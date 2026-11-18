@@ -441,7 +441,7 @@ def save_subset(source):
 # ============================================================================ Mooney (single photo, by hand)
 _mask_cache = {"key": None, "mask": None}
 _face_cache = {"key": None, "region": None, "finder": None}
-_last = {"result": None, "stem": None, "params": None}
+_last = {"result": None, "stem": None, "params": None, "head": ""}
 LAB_SOURCES = {"Original": "Original", "Raw (uncropped)": "Raw", "Upload": None}
 
 
@@ -468,7 +468,7 @@ def get_face_region(image):
     return _face_cache["region"]
 
 
-def run_lab(image, separate, bg_level, bg_mode, sigma, white_pct, preprocess, manual, thr, source, fname, autosave):
+def run_lab(image, separate, bg_level, bg_mode, sigma, white_pct, preprocess, manual, thr, source, fname):
     if image is None:
         return None, None, None, None, "Choose a photo from the project or upload one."
     mask = get_mask(image) if separate else None
@@ -488,9 +488,56 @@ def run_lab(image, separate, bg_level, bg_mode, sigma, white_pct, preprocess, ma
         "separated": int(r.mask is not None), "stats_on": "face" if region is not None else "subject",
         "face_brightness": "" if fb is None else f"{fb:.0f}", "preprocess": preprocess,
         "manual_threshold": int(bool(manual)), "mode": "manual"})
-    if autosave and stem:
-        info += "  \n" + save_current()
+    _last["head"] = info
+    info += "  \n" + lab_saved_note(stem, _last["params"])
     return Image.fromarray(r.separated), Image.fromarray(r.gray), Image.fromarray(r.blurred), Image.fromarray(r.mooney), info
+
+
+def lab_row(stem):
+    """The row of params.csv for this photo's saved Mooney, or None."""
+    return next((r for r in read_csv("params.csv") if r.get("file") == f"{stem}.png"), None) if stem else None
+
+
+def _same(a, b, tol):
+    try:
+        return abs(float(a) - float(b)) <= tol
+    except (TypeError, ValueError):
+        return False
+
+
+def lab_saved_note(stem, now):
+    """One line saying what is saved for this photo and whether the sliders show something else."""
+    if not stem:
+        return "An uploaded picture cannot be saved to the project."
+    row = lab_row(stem)
+    if row is None or not os.path.exists(P("Mooney", stem + ".png")):
+        return "No Mooney is saved for this photo yet. **Save this Mooney** keeps the one on screen."
+    how = "adjusted by hand" if row.get("mode") == "manual" else "made by Batch"
+    by_hand = str(row.get("manual_threshold", "0")) == "1"
+    same = (_same(row.get("sigma"), now["sigma"], 0.01) and row.get("bg_mooney") == now["bg_mooney"]
+            and _same(row.get("bg_level"), now["bg_level"], 0.5) and (row.get("preprocess") or "none") == now["preprocess"]
+            and by_hand == bool(now["manual_threshold"])
+            and (_same(row.get("threshold"), now["threshold"], 0.6) if by_hand else _same(row.get("white_target"), now["white_target"], 0.0006)))
+    if same:
+        return f"Saved Mooney of this photo: {how}. The sliders show its saved values."
+    return (f"Saved Mooney of this photo: {how}. **What you see is not saved.** *Save this Mooney* keeps it for this photo only; "
+            "no other photo changes.")
+
+
+def lab_values(source, f):
+    """
+    The control values for a photo: those its saved Mooney was made with, or the defaults if it has none.
+    Called whenever another photo is chosen, so an adjustment made on one photo is never carried to the next.
+    """
+    st = load_settings()
+    row = lab_row(os.path.splitext(f)[0]) if f and LAB_SOURCES.get(source) == "Original" else None
+    num = lambda key, default: float(row[key]) if row and _same(row.get(key), row.get(key), 0) else default
+    by_hand = bool(row) and str(row.get("manual_threshold", "0")) == "1"
+    mode = row.get("bg_mooney") if row and row.get("bg_mooney") in ("black", "white", "auto") else st["bg_mode"]
+    pre = row.get("preprocess") if row and row.get("preprocess") in ("none", "clahe") else st["preprocess"]
+    return (st["separate"], int(num("bg_level", st["bg_level"])), mode, num("sigma", st["sigma"]),
+            round(100 * num("white_target", st["white"] / 100), 1), pre, by_hand,
+            gr.update(value=round(num("threshold", 128)) if by_hand else 128, visible=by_hand))
 
 
 def save_current():
@@ -1172,7 +1219,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
         # ------------------------------------------------------------------ Mooney
         with gr.Tab("Mooney"):
             gr.Markdown("Look at one photo at a time and see the four phases. Move the sliders to adjust it by hand, then **Save this Mooney**. "
-                        "Mark the best ones with the star; they become the subset of ten.", elem_classes="lead")
+                        "A change affects this photo only, and only when you save it; another photo always opens with its own saved "
+                        "values. Mark the best ones with the star; they become the subset of ten.", elem_classes="lead")
             with gr.Row():
                 with gr.Column(scale=1, min_width=330):
                     lab_src = gr.Radio(list(LAB_SOURCES), value="Original", label="Photos from")
@@ -1182,8 +1230,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         lab_pos = gr.HTML("", min_width=60)
                         lab_next = gr.Button("Next →", size="sm", min_width=80)
                     inp = gr.Image(type="pil", label="Photo", height=230)
-                    sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.5, label="Blur σ (pixels)")
-                    white = gr.Slider(1, 99, value=_st["white"], step=1, label="White (% of the face)")
+                    sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (pixels)")
+                    white = gr.Slider(1, 99, value=_st["white"], step=0.5, label="White (% of the face)")
                     bg_mode = gr.Radio(["black", "white", "auto"], value=_st["bg_mode"], label="Background of the Mooney")
                     with gr.Accordion("More settings", open=False):
                         bg_level = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray")
@@ -1191,7 +1239,6 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         preprocess = gr.Radio(["none", "clahe"], value=_st["preprocess"], label="Preprocessing before the blur")
                         manual = gr.Checkbox(False, label="Set the threshold by hand (ignores the white share)")
                         thr = gr.Slider(0, 255, value=128, step=1, label="Threshold", visible=False)
-                        autosave = gr.Checkbox(False, label="Save automatically on every change")
                     with gr.Row():
                         lab_save = gr.Button("Save this Mooney", variant="primary", size="sm", min_width=120)
                         lab_fav = gr.Button("☆ Favourite", size="sm", min_width=90)
@@ -1441,16 +1488,24 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     # Mooney
     manual.change(lambda m: gr.update(visible=m), manual, thr)
     lab_controls = [inp, separate, bg_level, bg_mode, sigma, white, preprocess, manual, thr]
-    lab_inputs = lab_controls + [lab_src, lab_file, autosave]
-    for c in lab_controls:
-        c.change(run_lab, lab_inputs, [out_sep, out_gray, out_blur, out_moon, info], show_progress="minimal")
+    lab_inputs = lab_controls + [lab_src, lab_file]
+    for c in lab_controls:                               # one at a time and in order, so the picture and the saved state match
+        c.change(run_lab, lab_inputs, [out_sep, out_gray, out_blur, out_moon, info], show_progress="minimal",
+                 concurrency_limit=1, concurrency_id="lab")
     lab_src.change(lab_files, lab_src, lab_file)
-    lab_file.change(lab_load, [lab_src, lab_file], inp)
+    # another photo: first its own saved values into the controls, then the photo itself
+    lab_file.change(lab_values, [lab_src, lab_file], [separate, bg_level, bg_mode, sigma, white, preprocess, manual, thr]
+                    ).then(lab_load, [lab_src, lab_file], inp)
     lab_file.change(lab_position, [lab_src, lab_file], lab_pos)
     lab_file.change(lab_star_label, [lab_src, lab_file], lab_fav)
     lab_prev.click(lambda s, f: lab_step(s, f, -1), [lab_src, lab_file], lab_file)
     lab_next.click(lambda s, f: lab_step(s, f, +1), [lab_src, lab_file], lab_file)
-    lab_save.click(lambda: (save_current(), status_html(), gallery_of("Mooney"), params_table()), None, [lab_msg, status, b_gal, b_tab])
+    def lab_save_now():
+        msg = save_current()
+        note = lab_saved_note(_last["stem"], _last["params"]) if _last["params"] else ""
+        return msg, _last["head"] + "  \n" + note, status_html(), gallery_of("Mooney"), params_table()
+    lab_save.click(lab_save_now, None, [lab_msg, info, status, b_gal, b_tab], concurrency_limit=1, concurrency_id="lab")
+    lab_file.change(lambda: "", None, lab_msg)
     lab_fav.click(star_current, None, [lab_msg, fav_gal, lab_fav, b_favs])
     lab_default.click(lab_reset, None, [separate, bg_level, bg_mode, sigma, white, preprocess, manual])
     demo.load(lab_files, lab_src, lab_file)

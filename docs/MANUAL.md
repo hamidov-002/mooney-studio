@@ -124,8 +124,12 @@ of the Mooney follow the strong edges of the photo; simplicity rewards few, larg
 ## Mooney
 
 One photo at a time, with all four phases visible. Use *Previous* and *Next* to step through the folder.
-Changing a slider redraws the Mooney at once. The line under the buttons shows the white share reached, the
-threshold and the face brightness.
+Changing a slider redraws the Mooney at once. The lines under the buttons show the white share reached, the
+threshold and the face brightness, and whether what you see is what is saved for this photo.
+
+A change affects the photo on screen only, and nothing is written until you press *Save this Mooney*. When you
+move to another photo, the sliders jump to the values that photo's own saved Mooney was made with (or to the
+defaults if it has none), so an adjustment is never carried over to the next photo.
 
 - *Save this Mooney* writes the image to `Mooney/` and its values to `params.csv` with `mode = manual`.
   Batch leaves such photos alone.
