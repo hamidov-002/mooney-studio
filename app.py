@@ -2246,7 +2246,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         gr.Markdown("### Results of the current state", elem_classes="prose")
                         p_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
                         p_fig = gr.Image(show_label=False, height=380)
-                        p_cmp = gr.Dataframe(interactive=False, wrap=True, max_height=520, label="Photos and 3D sets side by side (empty until a 3D step has run)")
+                        p_cmp = gr.Dataframe(interactive=False, wrap=True, max_height=520, column_widths=["40%"] + ["15%"] * len(a3.SETS),
+                                             label="Photos and 3D sets side by side (empty until a 3D step has run)")
 
                     # -------------------------------------------------------------- Queue
                     with gr.Tab("Queue") as tab_queue:
@@ -2380,7 +2381,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                     "photos, the Basel model fitted to photos and the invented Basel faces, each with what the same systems returned. "
                                     + a3.COMPARE_NOTE + "</span>", elem_classes="prose")
                         x_table = gr.Dataframe(headers=["Measure"] + [a3.SET_NAMES[k] for k in a3.SETS], interactive=False, wrap=True, max_height=760,
-                                               label="One row per measure, one column per set")
+                                               column_widths=["40%"] + ["15%"] * len(a3.SETS), label="One row per measure, one column per set")
                         x_fig = gr.Image(show_label=False)
                         x_lights = gr.Dataframe(headers=a3.LIGHT_HEADERS, interactive=False, wrap=True, max_height=760,
                                                 label="The 3D sets by light direction")
