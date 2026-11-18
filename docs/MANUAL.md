@@ -47,6 +47,9 @@ The Run tab does steps 2, 4, 5 and 6 in one go and keeps the outcome under a nam
      running.
    - **3D faces**: from your photos, from the Basel Face Model, or both, with the default photos and lights.
    - **Export figures** and **Save the run**, with a choice of what the saved copy holds.
+   - **Which photos:** system 2 and the 3D step from photos each take a set: all photos, your favourites, or
+     any saved subset (3D also offers the suggestion of one photo per person). Systems 1, 3 and 4 always run
+     on every photo, so their tables stay complete.
 3. Press **Run**. The log names each step as it starts; a step that cannot run says why and the rest goes on.
 
 Below the log the tab shows the summary table and figure of the current state, the photos and the 3D sets

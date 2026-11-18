@@ -130,7 +130,7 @@ def state():
         "r": {n: (len(stems_in(f"Result{n}/Original") & orig), len(stems_in(f"Result{n}/Mooney") & orig)) for n in (1, 2, 3, 4, 5)},
         "figures": len([f for f in images_in("figures") if f.startswith("panel_")]),      # panels exist only after an export
         # system 2 is heavy, so it may be run on the subset only; its target is then the subset, not all photos
-        "vlm_target": len(subset_stems() & orig) if load_settings()["vlm_scope"] == "subset" else len(orig),
+        "vlm_target": len(orig) if photo_set_stems(vlm_scope_label()) is None else len(set(photo_set_stems(vlm_scope_label())) & orig),
     }
 
 
@@ -196,7 +196,7 @@ def overview_md():
         f"| Batch | {word(n > 0 and s['mooneys'] == n, s['mooneys'] > 0)} | {s['mooneys']} Mooneys for {n} photos |",
         f"| Mooney (adjust by hand) | optional | {s['manual']} adjusted by hand, {s['favs']} favourites |",
         f"| Vision systems | {word(n > 0 and all(r[k] >= tgt[k] for k in tgt), max(r.values()) > 0)} | "
-        f"face model {r[1]} / {n} · language model {r[2]} / {tgt[2]}{' (subset only)' if st['vlm_scope'] == 'subset' else ''} · "
+        f"face model {r[1]} / {n} · language model {r[2]} / {tgt[2]}{'' if vlm_scope_label() == SET_ALL else ' (' + vlm_scope_label() + ')'} · "
         f"learned depth {r[3]} / {n} · depth from shading {r[4]} / {n} |",
         f"| Results | {word(s['figures'] > 0)} | {s['figures']} per-photo panels exported to figures/ |",
         f"| Subset of {subset_target()} | {word(s['subset'] >= subset_target(), s['subset'] > 0)} | {s['subset']} pairs in Subset/ |",
@@ -332,6 +332,55 @@ def load_subsets():
 def subset_target():
     d = load_subsets()
     return int(d["sets"][d["active"]]["size"]) if d["active"] in d["sets"] else TARGET_SUBSET
+
+
+# ---------------------------------------------------------------------------- photo sets a step can run on
+SET_ALL, SET_FAVS, SET_SUGGEST = "All photos", "Favourites", "Suggested: one photo per person, favourites first"
+SET_PREFIX = "Subset: "
+
+
+def photo_set_choices(suggest=False):
+    """The sets offered wherever a step can run on part of the photos."""
+    out = [SET_ALL, SET_FAVS] + [SET_PREFIX + n for n in sorted(load_subsets()["sets"])]
+    return ([SET_SUGGEST] + out) if suggest else out
+
+
+def photo_set_stems(choice):
+    """Photo stems of a set, in its own order, or None for all photos."""
+    have = {os.path.splitext(f)[0] for f in images_in("Original")}
+    if choice in (None, "", SET_ALL, "all"):
+        return None
+    if choice == SET_FAVS:
+        return [s for s in load_favs() if s in have]
+    if choice == SET_SUGGEST:
+        return [os.path.splitext(f)[0] for f in a3.default_photos(PROJECT_ROOT)]
+    if choice == "subset":                               # older settings: the project's subset
+        return sorted(subset_stems() & have)
+    if str(choice).startswith(SET_PREFIX):
+        e = load_subsets()["sets"].get(str(choice)[len(SET_PREFIX):])
+        return [s for s in (e or {}).get("stems", []) if s in have]
+    return None
+
+
+def photo_set_files(choice):
+    """File names in Original/ for a set (all files for 'All photos')."""
+    files = images_in("Original")
+    stems = photo_set_stems(choice)
+    if stems is None:
+        return files
+    by = {os.path.splitext(f)[0]: f for f in files}
+    return [by[s] for s in stems if s in by]
+
+
+def vlm_scope_label():
+    """The saved choice for system 2 as one of the offered sets."""
+    sc = load_settings().get("vlm_scope", "subset")
+    if sc == "all":
+        return SET_ALL
+    if sc == "subset":
+        d = load_subsets()
+        return SET_PREFIX + d["active"] if d["active"] in d["sets"] else SET_FAVS
+    return sc if sc in photo_set_choices() else SET_FAVS
 
 
 def write_pairs(rel, stems):
@@ -761,19 +810,16 @@ def vision_job(fn, **kw):
     return handler
 
 
-VLM_SCOPES = {"The subset only": "subset", "All photos": "all"}
-VLM_SCOPE_LABEL = {v: k for k, v in VLM_SCOPES.items()}
-
-
 def vlm_args(source, identify, model, prompt, scope):
-    """Arguments for system 2, or None (= refuse to start) when no model is chosen or the subset is empty."""
+    """Arguments for system 2, or None (= refuse to start) when no model is chosen or the chosen set is empty."""
     if not model:
         return None
-    save_settings(vlm_scope=VLM_SCOPES[scope])
-    only = subset_stems() if VLM_SCOPES[scope] == "subset" else None
+    save_settings(vlm_scope="all" if scope == SET_ALL else scope)
+    only = photo_set_stems(scope)
     if only is not None and not only:
         return None
-    return {"source": source, "identify": bool(identify), "model": model, "prompt": prompt, "only": only}
+    return {"source": source, "identify": bool(identify), "model": model, "prompt": prompt,
+            "only": None if only is None else set(only)}
 
 
 def pick_model(models):
@@ -910,8 +956,8 @@ def d3_switch(source, which):
             basel_note(which), gr.update(value=f"Export to {sub}/figures/")) + d3_results(source)
 
 
-def d3_suggest():
-    return gr.update(choices=images_in("Original"), value=a3.default_photos(PROJECT_ROOT))
+def d3_suggest(choice=SET_SUGGEST):
+    return gr.update(choices=images_in("Original"), value=photo_set_files(choice))
 
 
 def d3_job(steps, sub, files, lights, basel, progress):
@@ -987,7 +1033,7 @@ def d3_compare_export():
 
 
 # ============================================================================ Run (the whole pipeline with one button)
-PIPE_SYSTEMS = ["1 Face model", "2 Vision-language model (subset only, needs Ollama)", "3 Learned depth", "4 Depth from shading"]
+PIPE_SYSTEMS = ["1 Face model", "2 Vision-language model (chosen set only, needs Ollama)", "3 Learned depth", "4 Depth from shading"]
 RUNS_COLS = ["Name", "Saved", "Mooneys", "By hand", "Blur", "White", "Background", "Systems", "Also holds", "Note"]
 RUNS_WIDTHS = ["14%", "12%", "9%", "7%", "6%", "7%", "10%", "8%", "14%", "13%"]
 RUNS_SHORT = {"figures": "figures", "Subset": "subset", "3D": "3D from photos", "3D_basel": "3D Basel", "Original": "photos"}
@@ -1021,7 +1067,7 @@ def pipeline_view(msg=""):
 
 
 def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
-             progress=gr.Progress()):
+             vlm_set=None, d3_set=SET_SUGGEST, progress=gr.Progress()):
     """
     One full run: Mooneys, vision systems, 3D faces, figures, saved copy - each part only if it is ticked.
     Nothing here computes anything itself; every step calls the same function as its own tab.
@@ -1057,17 +1103,21 @@ def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, system
             steps.append((f"System {label}", 3, lambda log, prog, fn=fn: fn(PROJECT_ROOT, "Original", log=log, progress=prog)))
     if PIPE_SYSTEMS[1] in systems:
         def step_vlm(log, prog):
-            model, only = pick_model(vs.status()["vlm_models"]), subset_stems()
+            model, only = pick_model(vs.status()["vlm_models"]), photo_set_stems(vlm_set or vlm_scope_label())
             if not model:
                 log("Skipped: Ollama is not running or has no vision model (start it with `ollama serve`)."); return
-            if not only:
-                log("Skipped: the subset is empty and no favourites are marked."); return
-            vs.run_vlm(PROJECT_ROOT, model, source="Original", log=log, progress=prog, only=only)
-        steps.append(("System 2 Vision-language model, on the subset", 3, step_vlm))
+            if only is not None and not only:
+                log(f"Skipped: the set “{vlm_set}” holds no photos."); return
+            save_settings(vlm_scope="all" if vlm_set == SET_ALL else (vlm_set or vlm_scope_label()))
+            log(f"On: {vlm_set or vlm_scope_label()}" + ("" if only is None else f" ({len(only)} photos)"))
+            vs.run_vlm(PROJECT_ROOT, model, source="Original", log=log, progress=prog, only=None if only is None else set(only))
+        steps.append(("System 2 Vision-language model", 3, step_vlm))
     for label in d3:
         def step_3d(log, prog, label=label):
             basel = {"faces": int(n_faces or cfg.BASEL_FACES), "model": "Whole head", "poses": ["frontal"], "shadows": cfg.BASEL_SHADOWS}
-            d3_job(["render", "Mooneys", "systems"], D3_SOURCES[label], a3.default_photos(PROJECT_ROOT),
+            if D3_SOURCES[label] == f3.SUB:
+                log(f"Photos: {d3_set} ({len(photo_set_files(d3_set))})")
+            d3_job(["render", "Mooneys", "systems"], D3_SOURCES[label], photo_set_files(d3_set),
                    [l for l in cfg.LIGHTS_3D if l in f3.LIGHTS], basel, lambda v, desc=None: prog(v))(log)
         steps.append((f"3D faces: {label[0].lower() + label[1:]}", 4, step_3d))
     if do_export:
@@ -1277,11 +1327,14 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                         label="Step 3 · 3D faces: render, make Mooneys, run systems 1, 3 and 4 against the true depth")
                 p_faces = gr.Slider(2, 30, value=cfg.BASEL_FACES, step=1, label="Basel faces", scale=1)
             with gr.Row():
+                p_vlm_set = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=1)
+                p_3d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="3D from photos uses", scale=1)
+            with gr.Row():
                 p_export = gr.Checkbox(True, label="Step 4 · Export figures", scale=1)
                 p_save = gr.Checkbox(True, label="Step 5 · Save the run under its name", scale=1)
                 p_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
                                           label="The saved run includes, besides the Mooneys and their values", scale=3)
-            gr.Markdown("3D from photos uses the suggested photos and the five default lights; Basel faces are whole heads, frontal, "
+            gr.Markdown("3D from photos uses the chosen photos and the five default lights; Basel faces are whole heads, frontal, "
                         "with cast shadows. For other choices use the **3D faces** tab. Other Batch options (white rule, "
                         "preprocessing) are taken from the saved defaults.", elem_classes="hint")
             with gr.Row():
@@ -1435,7 +1488,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         "also in `Subset/`: the vision-language model runs on it, and the counter at the top shows it.", elem_classes="hint")
 
         # ------------------------------------------------------------------ Vision systems
-        with gr.Tab("Vision systems"):
+        with gr.Tab("Vision systems") as tab_vision:
             gr.Markdown("Each system takes every original and its Mooney and returns values for both. One result file per image goes to "
                         "`ResultN/Original` and `ResultN/Mooney`, and a table per system to `analysis/`.", elem_classes="lead")
             v_check = gr.Button("Check which systems are ready", size="sm", scale=0)
@@ -1455,10 +1508,10 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                       label="Ollama model", allow_custom_value=True, scale=1)
                 v_prompt = gr.Textbox(vs.VLM_PROMPT, label="Prompt (saved with the results)", lines=3, scale=3)
             with gr.Row():
-                v_scope = gr.Radio(list(VLM_SCOPES), value=VLM_SCOPE_LABEL[_st["vlm_scope"]], label="Run system 2 on", scale=1)
+                v_scope = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="Run system 2 on", scale=1)
                 gr.Markdown("This model is heavy: about 5 GB of memory and several seconds per image, so all photos keep the laptop busy "
-                            "for a long time. *The subset only* runs it on the pairs in `Subset/` (or on your favourites while that folder "
-                            "is empty). Systems 1, 3 and 4 are light and always run on everything.", elem_classes="hint", scale=3)
+                            "for a long time. Choose a subset or your favourites. Systems 1, 3 and 4 are light and always run on every "
+                            "photo, so their tables stay complete.", elem_classes="hint", scale=3)
             with gr.Row(elem_classes="system"):
                 gr.Markdown("**3 · Learned depth**   Depth Anything V2, ViT-S: a neural network trained on millions of images  \n"
                             "<span class='hint'>A depth map for each image, and how well the Mooney's depth map matches its original's.</span>", scale=3)
@@ -1561,9 +1614,10 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                    "mesh breaks for them.", elem_classes="hint")
             with gr.Column(visible=True) as d_box_photos:
                 with gr.Row():
-                    d_files = gr.Dropdown(choices=images_in("Original"), value=a3.default_photos(PROJECT_ROOT), multiselect=True, scale=4,
-                                          label="Photos to turn into 3D faces   suggested: favourites first, one photo per person")
-                    d_suggest = gr.Button("Suggest again", size="sm", scale=0, min_width=120)
+                    d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="Take the photos from", scale=2)
+                    d_suggest = gr.Button("Fill in again", size="sm", scale=0, min_width=120)
+                d_files = gr.Dropdown(choices=images_in("Original"), value=a3.default_photos(PROJECT_ROOT), multiselect=True,
+                                      label="Photos to turn into 3D faces (you can still add or remove single photos)")
             with gr.Column(visible=False) as d_box_basel:
                 d_model_note = gr.Markdown(basel_note(), elem_classes="hint")
                 with gr.Row():
@@ -1708,7 +1762,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     v_identify.change(lambda on: vs.VLM_PROMPT_IDENTITY if on else vs.VLM_PROMPT, v_identify, v_prompt)
     v_run1.click(vision_job(vs.run_face, args=lambda src, ident: {"source": src, "identify": bool(ident)}),
                  [v_src, v_identify], [v_log, status])
-    v_run2.click(vision_job(vs.run_vlm, refuse="Not started. Either no Ollama model is selected (start Ollama with `ollama serve`, pull a vision model, press the check button), "
+    v_run2.click(vision_job(vs.run_vlm, refuse="Not started. Either the chosen set of photos is empty, or no Ollama model is selected (start Ollama with `ollama serve`, pull a vision model, press the check button), "
                                                     "or the subset is empty (mark favourites with the star first, or choose All photos).",
                             args=vlm_args),
                  [v_src, v_identify, v_model, v_prompt, v_scope], [v_log, status])
@@ -1725,10 +1779,13 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     demo.load(results_load, None, [r_table, r_fig, r_stem, r_msg])
     # Run
     p_shown = [p_msg, p_table, p_fig, p_cmp, p_runs]
-    p_run.click(pipeline, [p_name, p_note, p_keep, p_batch, p_sigma, p_white, p_bg, p_bgl, p_systems, p_3d, p_faces, p_export, p_save],
+    p_run.click(pipeline, [p_name, p_note, p_keep, p_batch, p_sigma, p_white, p_bg, p_bgl, p_systems, p_3d, p_faces, p_export, p_save,
+                           p_vlm_set, p_3d_set],
                 [p_log] + p_shown + [status, c_runs])
     p_only.click(pipeline_save_only, [p_name, p_keep, p_note], [p_msg, p_runs, c_runs])
     tab_run.select(pipeline_view, None, p_shown)
+    tab_run.select(lambda: (gr.update(choices=photo_set_choices(), value=vlm_scope_label()),
+                            gr.update(choices=photo_set_choices(suggest=True))), None, [p_vlm_set, p_3d_set])
 
     # Analysis
     def analysis_groups(by):
@@ -1761,7 +1818,10 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                      [d_log] + d_shown).then(d3_compare, None, x_shown)
     d_source.change(d3_switch, [d_source, d_model], [d_box_photos, d_box_basel, d_caveat, d_model_note, d_export] + d_shown)
     d_model.change(basel_note, d_model, d_model_note)
-    d_suggest.click(d3_suggest, None, d_files)
+    d_suggest.click(d3_suggest, d_set, d_files)
+    d_set.change(d3_suggest, d_set, d_files)
+    tab_vision.select(lambda: gr.update(choices=photo_set_choices(), value=vlm_scope_label()), None, v_scope)
+    tab_3d.select(lambda: gr.update(choices=photo_set_choices(suggest=True)), None, d_set)
     d_person.change(d3_sheet, [d_source, d_person], d_sheet)
     d_refresh.click(d3_results, [d_source, d_person], d_shown)
     tab_3d.select(d3_results, [d_source, d_person], d_shown).then(d3_compare, None, x_shown)
