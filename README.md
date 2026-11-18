@@ -72,6 +72,7 @@ Switching does not move anything: each working folder has its own project.
 | Dataset | collect openly licensed portraits from Wikimedia Commons, review them, remove bad ones |
 | Batch | one Mooney per photo with the same settings |
 | Mooney | adjust single photos by hand, mark favourites |
+| Subset | choose pairs from your favourites into named subsets of any size |
 | Vision systems | face model, vision-language model, learned depth, depth from shading |
 | Results | summary table, figure, per-photo viewer; save the run under a name |
 | Analysis | results by properties of the photos; compare saved runs |
@@ -92,6 +93,7 @@ project/
   Original/            512 px crops of the photos
   Mooney/              one PNG per photo
   Subset/Original, Subset/Mooney    the pairs you picked as the best
+  Subsets/<name>/                   further named subsets, same two folders each
   Result1..4/Original, /Mooney      one file per image and vision system
   Raw/                 uncropped photos
   analysis/            one table per system, and the settings each system ran with

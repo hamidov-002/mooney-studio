@@ -26,6 +26,7 @@ folder has its own project.
 | 1 | Dataset | Collect portraits, look through them, remove bad ones | `Original/`, `Raw/`, `dataset.csv` |
 | 2 | Batch | One Mooney per photo, same values for all | `Mooney/`, `params.csv` |
 | 3 | Mooney | Adjust single photos by hand, mark favourites | `Mooney/`, `params.csv`, `favorites.json` |
+| – | Subset | Choose pairs from your favourites into a named subset of any size | `Subset/`, `Subsets/<name>/`, `subsets.json` |
 | 4 | Vision systems | Each system runs on every original and every Mooney | `Result1/` … `Result4/`, `analysis/` |
 | 5 | Results | Summary table, figure, per-photo viewer, export | `figures/` |
 | – | Analysis | Results per photo, by group, agreement between systems, ranking; comparison of saved runs | `figures/analysis_*` |
@@ -133,11 +134,23 @@ defaults if it has none), so an adjustment is never carried over to the next pho
 
 - *Save this Mooney* writes the image to `Mooney/` and its values to `params.csv` with `mode = manual`.
   Batch leaves such photos alone.
-- *Favourite* marks the photo as a candidate for the subset of ten.
+- *Favourite* marks the photo as a candidate for a subset.
 - *Back to defaults* returns the sliders to the saved defaults.
 
-When ten favourites are marked, press *Save favourites to Subset/* in the Batch tab. The pairs are copied to
-`Subset/Original` and `Subset/Mooney`.
+## Subset
+
+A subset is a chosen set of pairs (original and Mooney) with a name and a size. You can keep several.
+
+1. Open a saved subset at the top, or type a new name. Set its size (10 unless you change it).
+2. The left side shows your favourites; switch *Show* to *All Mooneys* to choose from everything. Click a
+   Mooney to add it (it gets a ✓), click it again to take it out. The right side shows what is in the subset,
+   as Mooneys and as originals. *Fill up from favourites* adds favourites until the size is reached.
+3. *Save subset* writes the pairs to `Subsets/<name>/Original` and `Subsets/<name>/Mooney`.
+
+One subset is the project's subset: it is also written to `Subset/Original` and `Subset/Mooney`, the
+vision-language model runs on it, and the counter at the top shows it. Tick *Make it the project's subset*
+when saving to choose which one that is. Nothing is saved until you press *Save subset*; the line above the
+pictures says whether the choice on screen differs from the saved one.
 
 ## Vision systems
 

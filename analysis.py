@@ -507,14 +507,14 @@ def export(project, by):
 
 # ============================================================================ saved runs
 CURRENT = "current"
-RUN_PARTS = ["Mooney", "Result1", "Result2", "Result3", "Result4", "Result5", "analysis", "figures", "Subset",
+RUN_PARTS = ["Mooney", "Result1", "Result2", "Result3", "Result4", "Result5", "analysis", "figures", "Subset", "Subsets",
              "3D", "3D_basel"]                                                             # folders copied into a run
-RUN_FILES = ["params.csv", "settings.json", "favorites.json", "dataset.csv"]              # files copied into a run
+RUN_FILES = ["params.csv", "settings.json", "favorites.json", "subsets.json", "dataset.csv"]              # files copied into a run
 # What a run can hold, in the order shown in the app: key -> (label, folders). The Mooneys and RUN_FILES are always kept.
 RUN_GROUPS = {
     "results": ("Vision system results and tables", ["Result1", "Result2", "Result3", "Result4", "Result5", "analysis"]),
     "figures": ("Exported figures", ["figures"]),
-    "subset": ("Subset", ["Subset"]),
+    "subset": ("Subset", ["Subset", "Subsets"]),
     "3d": ("3D faces from photos", ["3D"]),
     "basel": ("3D faces from the Basel Face Model", ["3D_basel"]),
     "photos": ("Original photos", ["Original"]),

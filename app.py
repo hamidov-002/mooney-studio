@@ -23,6 +23,8 @@ import argparse
 import csv
 import json
 import os
+import re
+import shutil
 import sys
 import threading
 import time
@@ -151,7 +153,7 @@ def status_html():
         t = s["vlm_target"] if k == 2 else n
         done = min(o, m, t) if k == 2 else min(o, m)          # older results outside the subset are not counted
         chips.append(chip(f"{k} {name}", f"{done} / {t}", (done >= t) if t and (o or m) else None))
-    chips.append(chip("Subset", f"{s['subset']} / {TARGET_SUBSET}", (s["subset"] >= TARGET_SUBSET) if s["subset"] else None))
+    chips.append(chip("Subset", f"{s['subset']} / {subset_target()}", (s["subset"] >= subset_target()) if s["subset"] else None))
     return "<div class='chips'>" + "".join(chips) + "</div>"
 
 
@@ -175,8 +177,8 @@ def overview_md():
     elif any(r[k] < tgt[k] for k in tgt):
         k = next(k for k in (1, 2, 3, 4) if r[k] < tgt[k])
         nxt = f"Run system {k} in **Vision systems** ({r[k]} of {tgt[k]} photos done)."
-    elif s["subset"] < TARGET_SUBSET:
-        nxt = f"Mark your best {TARGET_SUBSET} Mooneys with the star in **Mooney**, then press *Save favourites to Subset/* in **Batch**."
+    elif s["subset"] < subset_target():
+        nxt = f"Mark your best Mooneys with the star in **Mooney**, then choose {subset_target()} of them in **Subset** and save."
     elif not s["figures"]:
         nxt = "Press *Export figures* in **Results**."
     else:
@@ -197,7 +199,7 @@ def overview_md():
         f"face model {r[1]} / {n} · language model {r[2]} / {tgt[2]}{' (subset only)' if st['vlm_scope'] == 'subset' else ''} · "
         f"learned depth {r[3]} / {n} · depth from shading {r[4]} / {n} |",
         f"| Results | {word(s['figures'] > 0)} | {s['figures']} per-photo panels exported to figures/ |",
-        f"| Subset of {TARGET_SUBSET} | {word(s['subset'] >= TARGET_SUBSET, s['subset'] > 0)} | {s['subset']} pairs in Subset/ |",
+        f"| Subset of {subset_target()} | {word(s['subset'] >= subset_target(), s['subset'] > 0)} | {s['subset']} pairs in Subset/ |",
         f"| 3D faces from photos | {d3_word()} | {d3_line()} |",
         f"| 3D faces from the Basel Face Model | {d3_word(bfm.SUB)} | {d3_line(bfm.SUB)} |",
         "",
@@ -303,7 +305,48 @@ def subset_stems():
 
 def fav_text():
     favs = load_favs()
-    return f"{len(favs)} of {TARGET_SUBSET}: " + ", ".join(favs) if favs else "none yet"
+    return f"{len(favs)}: " + ", ".join(favs) if favs else "none yet"
+
+
+# ---------------------------------------------------------------------------- named subsets
+# subsets.json: {"active": name or None, "sets": {name: {"size": n, "stems": [...]}}}. Every saved subset is a pair
+# of folders Subsets/<name>/Original and Subsets/<name>/Mooney; the active one is also written to Subset/, the
+# folder the rest of the app (system 2, the counter at the top) reads.
+def subset_slug(name):
+    return re.sub(r"-+", "-", re.sub(r"[^A-Za-z0-9]+", "-", str(name or "").strip())).strip("-")[:40]
+
+
+def load_subsets():
+    try:
+        d = json.load(open(P("subsets.json"), encoding="utf-8"))
+        d.setdefault("active", None); d.setdefault("sets", {})
+    except Exception:
+        d = {"active": None, "sets": {}}
+    if not d["sets"]:                                    # a project from before named subsets: take what is in Subset/
+        old = sorted(stems_in("Subset/Original") & stems_in("Subset/Mooney"))
+        if old:
+            d = {"active": "main", "sets": {"main": {"size": max(len(old), TARGET_SUBSET), "stems": old}}}
+    return d
+
+
+def subset_target():
+    d = load_subsets()
+    return int(d["sets"][d["active"]]["size"]) if d["active"] in d["sets"] else TARGET_SUBSET
+
+
+def write_pairs(rel, stems):
+    """Empty <rel>/Original and <rel>/Mooney and copy the pairs of these photos into them. Returns how many were copied."""
+    n = 0
+    for part in ("Original", "Mooney"):
+        os.makedirs(P(rel, part), exist_ok=True)
+        for old in os.listdir(P(rel, part)):
+            if os.path.isfile(P(rel, part, old)):
+                os.remove(P(rel, part, old))
+    for stem in stems:
+        fo = next((f for f in images_in("Original") if os.path.splitext(f)[0] == stem), None)
+        if fo and os.path.exists(P("Mooney", stem + ".png")):
+            shutil.copy(P("Original", fo), P(rel, "Original")); shutil.copy(P("Mooney", stem + ".png"), P(rel, "Mooney")); n += 1
+    return n
 
 
 def upsert_params(row):
@@ -429,13 +472,118 @@ def star_in_gallery(evt: gr.SelectData):
     return fav_text(), fav_gallery()
 
 
-def save_subset(source):
+# ============================================================================ Subset (named, of any size)
+SUBSET_SHOW = ["Favourites only", "All Mooneys"]
+
+
+def subset_names():
+    return sorted(load_subsets()["sets"])
+
+
+def subset_candidates(show):
+    """Stems offered for choosing, in the order shown: the favourites, or every photo that has a Mooney."""
+    have = [os.path.splitext(f)[0] for f in images_in("Mooney")]
     favs = load_favs()
-    if not favs:
-        return "No favourites yet: click Mooneys in the gallery, or use the star in Mooney.", status_html()
-    n = bt.save_subset(PROJECT_ROOT, [f + ".png" for f in favs], source=source)
-    note = "" if n == TARGET_SUBSET else f" The target is {TARGET_SUBSET}."
-    return f"{n} favourite pairs copied to Subset/Original and Subset/Mooney.{note}", status_html()
+    return [s for s in have if s in favs] if show == SUBSET_SHOW[0] else have
+
+
+def subset_view(name, size, show, chosen, msg=""):
+    """Everything the Subset tab shows for the current choice: line of text, the two galleries, originals, message."""
+    chosen = [s for s in chosen if os.path.exists(P("Mooney", s + ".png"))]
+    cand = subset_candidates(show)
+    size = int(size or TARGET_SUBSET)
+    d = load_subsets()
+    saved = d["sets"].get(str(name or "").strip(), {}).get("stems")
+    state = ("not saved yet" if saved is None else "saved" if sorted(saved) == sorted(chosen) else "**changed since it was saved**")
+    line = (f"**{len(chosen)} of {size}** chosen · {state}"
+            + (" · this is the project's subset (also in `Subset/`)" if d["active"] == str(name or "").strip() and saved is not None else "")
+            + f" · {len(cand)} Mooneys offered" + (" (mark more with the star in **Mooney**)" if show == SUBSET_SHOW[0] else ""))
+    orig = {os.path.splitext(f)[0]: f for f in images_in("Original")}
+    return (line,
+            [(P("Mooney", s + ".png"), ("✓ " if s in chosen else "") + s) for s in cand],
+            [(P("Mooney", s + ".png"), s) for s in chosen],
+            [(P("Original", orig[s]), s) for s in chosen if s in orig],
+            msg, chosen)
+
+
+def subset_open(name, show):
+    """Another subset was chosen or a new name typed: load its photos and size (a new name starts empty)."""
+    d = load_subsets()
+    e = d["sets"].get(str(name or "").strip())
+    size = int(e["size"]) if e else TARGET_SUBSET
+    return (gr.update(value=size),) + subset_view(name, size, show, list(e["stems"]) if e else [])
+
+
+def subset_toggle(name, size, show, chosen, evt: gr.SelectData):
+    cand = subset_candidates(show)
+    msg = ""
+    if evt.index is not None and evt.index < len(cand):
+        s = cand[evt.index]
+        if s in chosen:
+            chosen = [c for c in chosen if c != s]
+        elif len(chosen) >= int(size or TARGET_SUBSET):
+            msg = f"The subset is full ({len(chosen)} of {int(size)}). Remove one first, or raise the size."
+        else:
+            chosen = chosen + [s]
+    return subset_view(name, size, show, chosen, msg)
+
+
+def subset_remove(name, size, show, chosen, evt: gr.SelectData):
+    if evt.index is not None and evt.index < len(chosen):
+        chosen = [c for k, c in enumerate(chosen) if k != evt.index]
+    return subset_view(name, size, show, chosen)
+
+
+def subset_fill(name, size, show, chosen):
+    """Add favourites, in their order, until the size is reached."""
+    room = int(size or TARGET_SUBSET) - len(chosen)
+    add = [s for s in subset_candidates(SUBSET_SHOW[0]) if s not in chosen][:max(room, 0)]
+    msg = f"Added {len(add)} favourites." if add else "Nothing added: the subset is full or there are no more favourites."
+    return subset_view(name, size, show, chosen + add, msg)
+
+
+def subset_save(name, size, show, chosen, make_active):
+    name = str(name or "").strip()
+    slug = subset_slug(name)
+    if not slug:
+        return subset_view(name, size, show, chosen, "Give the subset a name first.") + (gr.update(), status_html())
+    if not chosen:
+        return subset_view(name, size, show, chosen, "Nothing chosen yet: click Mooneys on the left.") + (gr.update(), status_html())
+    init_project()
+    d = load_subsets()
+    d["sets"][name] = {"size": int(size or TARGET_SUBSET), "stems": list(chosen)}
+    n = write_pairs(os.path.join("Subsets", slug), chosen)
+    where = f"`Subsets/{slug}/`"
+    if make_active or d["active"] in (None, name):
+        d["active"] = name
+        write_pairs("Subset", chosen)
+        where += " and `Subset/`"
+    json.dump(d, open(P("subsets.json"), "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    msg = f"Saved “{name}”: {n} pairs in {where} (Original and Mooney)."
+    if n < int(size or TARGET_SUBSET):
+        msg += f" The size is {int(size)}; {int(size) - n} more can be added."
+    return subset_view(name, size, show, chosen, msg) + (gr.update(choices=subset_names(), value=name), status_html())
+
+
+def subset_delete(name, show):
+    name = str(name or "").strip()
+    d = load_subsets()
+    if name not in d["sets"]:
+        return ((gr.update(), gr.update()) + subset_view(name, TARGET_SUBSET, show, [], "This subset was never saved; nothing to delete.")
+                + (gr.update(), status_html()))
+    del d["sets"][name]
+    shutil.rmtree(P("Subsets", subset_slug(name)), ignore_errors=True)
+    note = ""
+    if d["active"] == name:
+        d["active"] = None
+        write_pairs("Subset", [])
+        note = " It was the project's subset, so `Subset/` is empty now."
+    json.dump(d, open(P("subsets.json"), "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    names = subset_names()
+    nxt = names[0] if names else "main"
+    out = subset_open(nxt, show)                          # size, line, candidates, chosen Mooneys, originals, message, state
+    return ((nxt,) + out[:5] + (f"Deleted “{name}”.{note}", out[6])
+            + (gr.update(choices=names, value=nxt if names else None), status_html()))
 
 
 # ============================================================================ Mooney (single photo, by hand)
@@ -556,7 +704,7 @@ def star_current():
         return "Choose a photo from the project first.", gr.update(), gr.update(), gr.update()
     favs = toggle_favourite(_last["stem"])
     on = _last["stem"] in favs
-    return (f"{'Added to' if on else 'Removed from'} favourites: {_last['stem']} ({len(favs)} of {TARGET_SUBSET}).",
+    return (f"{'Added to' if on else 'Removed from'} favourites: {_last['stem']} ({len(favs)} marked).",
             fav_gallery(), gr.update(value="★ Favourite" if on else "☆ Favourite"), fav_text())
 
 
@@ -1209,9 +1357,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
             with gr.Row():
                 b_run = gr.Button("Generate all Mooneys", variant="primary", size="md", scale=2)
                 b_save_def = gr.Button("Save these values as defaults", size="md", scale=1)
-                b_subset = gr.Button("Save favourites to Subset/", size="md", scale=1)
             b_log = gr.Textbox(label="Log", lines=9, max_lines=9, interactive=False, autoscroll=True, elem_classes="log")
-            b_favs = gr.Textbox(fav_text(), label="Favourites for the subset (click a Mooney below to add or remove it)", interactive=False)
+            b_favs = gr.Textbox(fav_text(), label="Favourites (click a Mooney below to add or remove it; choose the subset from them in the Subset tab)", interactive=False)
             b_gal = gr.Gallery(gallery_of("Mooney"), label="Mooney/", columns=10, height=420, object_fit="contain", allow_preview=False)
             with gr.Accordion("params.csv (every value used, per photo)", open=False):
                 b_tab = gr.Dataframe(params_table(), headers=PARAM_COLS, interactive=False, wrap=True)
@@ -1254,6 +1401,38 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         out_moon = gr.Image(label="Phase 4   Mooney", format="png")
                     with gr.Accordion("Favourites", open=False):
                         fav_gal = gr.Gallery(fav_gallery(), columns=10, height=150, object_fit="contain", allow_preview=False)
+
+        # ------------------------------------------------------------------ Subset
+        with gr.Tab("Subset") as tab_subset:
+            gr.Markdown("Choose the pairs that go into a subset. Click a Mooney on the left to add it, click it again or click it on the "
+                        "right to take it out, then **Save**. A subset has a name and a size; you can keep several.", elem_classes="lead")
+            _sub0 = load_subsets()
+            _sub_name = _sub0["active"] or (sorted(_sub0["sets"])[0] if _sub0["sets"] else "main")
+            with gr.Row():
+                s_pick = gr.Dropdown(choices=sorted(_sub0["sets"]), value=_sub_name if _sub_name in _sub0["sets"] else None, scale=2,
+                                     label="Open a saved subset")
+                s_name = gr.Textbox(_sub_name, label="Name (a new name saves a new subset)", max_lines=1, scale=2)
+                s_size = gr.Number(_sub0["sets"].get(_sub_name, {}).get("size", TARGET_SUBSET), label="Size", precision=0, minimum=1,
+                                   maximum=500, scale=1, min_width=90)
+                s_show = gr.Radio(SUBSET_SHOW, value=SUBSET_SHOW[0], label="Show", scale=2)
+            s_line = gr.Markdown(elem_classes="prose")
+            s_chosen = gr.State([])
+            with gr.Row():
+                with gr.Column(scale=3):
+                    s_cand = gr.Gallery(label="Click to add or remove   ✓ = in the subset", columns=6, height=560, object_fit="contain",
+                                        allow_preview=False)
+                with gr.Column(scale=2):
+                    s_in = gr.Gallery(label="In this subset: Mooneys (click to remove)", columns=5, height=270, object_fit="contain",
+                                      allow_preview=False)
+                    s_orig = gr.Gallery(label="In this subset: originals", columns=5, height=270, object_fit="contain", allow_preview=False)
+            with gr.Row():
+                s_save = gr.Button("Save subset", variant="primary", scale=2)
+                s_active = gr.Checkbox(True, label="Make it the project's subset (written to Subset/ as well)", scale=2)
+                s_fill = gr.Button("Fill up from favourites", scale=1)
+                s_del = gr.Button("Delete this subset", scale=1)
+            s_msg = gr.Markdown(elem_classes="hint")
+            gr.Markdown("Each saved subset is a folder `Subsets/<name>/` with `Original/` and `Mooney/`. The project's subset is "
+                        "also in `Subset/`: the vision-language model runs on it, and the counter at the top shows it.", elem_classes="hint")
 
         # ------------------------------------------------------------------ Vision systems
         with gr.Tab("Vision systems"):
@@ -1483,7 +1662,6 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     b_run.click(run_batch, [b_src] + b_values + [b_measure, b_keep, b_sweep, b_sig, b_wht], [b_log, b_gal, b_tab, status])
     b_save_def.click(save_defaults, b_values, b_log)
     b_gal.select(star_in_gallery, None, [b_favs, fav_gal])
-    b_subset.click(save_subset, b_src, [b_log, status])
 
     # Mooney
     manual.change(lambda m: gr.update(visible=m), manual, thr)
@@ -1509,6 +1687,21 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     lab_fav.click(star_current, None, [lab_msg, fav_gal, lab_fav, b_favs])
     lab_default.click(lab_reset, None, [separate, bg_level, bg_mode, sigma, white, preprocess, manual])
     demo.load(lab_files, lab_src, lab_file)
+
+    # Subset
+    s_shown = [s_line, s_cand, s_in, s_orig, s_msg, s_chosen]
+    s_args = [s_name, s_size, s_show, s_chosen]
+    tab_subset.select(lambda n, z, sh, ch: subset_view(n, z, sh, ch) if ch else subset_open(n, sh)[1:], s_args, s_shown)
+    s_pick.input(lambda n, sh: (n,) + subset_open(n, sh), [s_pick, s_show], [s_name, s_size] + s_shown)
+    s_name.submit(subset_view, s_args, s_shown)
+    s_name.blur(subset_view, s_args, s_shown)
+    s_show.change(subset_view, s_args, s_shown)
+    s_size.change(subset_view, s_args, s_shown)
+    s_cand.select(subset_toggle, s_args, s_shown)
+    s_in.select(subset_remove, s_args, s_shown)
+    s_fill.click(subset_fill, s_args, s_shown)
+    s_save.click(subset_save, s_args + [s_active], s_shown + [s_pick, status])
+    s_del.click(subset_delete, [s_name, s_show], [s_name, s_size] + s_shown + [s_pick, status])
 
     # Vision systems
     v_check.click(vision_status, None, [v_s1, v_s2, v_s3, v_s4, v_s5, v_model])
