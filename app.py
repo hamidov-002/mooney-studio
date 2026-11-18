@@ -1422,9 +1422,9 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                     s_cand = gr.Gallery(label="Click to add or remove   ✓ = in the subset", columns=6, height=560, object_fit="contain",
                                         allow_preview=False)
                 with gr.Column(scale=2):
-                    s_in = gr.Gallery(label="In this subset: Mooneys (click to remove)", columns=5, height=270, object_fit="contain",
+                    s_in = gr.Gallery(label="In this subset: Mooneys (click to remove)", columns=4, height=270, object_fit="contain",
                                       allow_preview=False)
-                    s_orig = gr.Gallery(label="In this subset: originals", columns=5, height=270, object_fit="contain", allow_preview=False)
+                    s_orig = gr.Gallery(label="In this subset: originals", columns=4, height=270, object_fit="contain", allow_preview=False)
             with gr.Row():
                 s_save = gr.Button("Save subset", variant="primary", scale=2)
                 s_active = gr.Checkbox(True, label="Make it the project's subset (written to Subset/ as well)", scale=2)
