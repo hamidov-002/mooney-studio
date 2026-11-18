@@ -877,6 +877,8 @@ footer { display: none !important; }
 #head h1 { font-size: 21px; font-weight: 600; letter-spacing: -0.01em; margin: 0; color: var(--ink); line-height: 1.15; }
 #head .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .chips { margin-top: 2px; }
+#saverun { align-items: center; gap: 10px; margin: 0 0 6px; max-width: 1100px; }
+#saverun-msg { flex: 3 1 0; min-width: 260px; }
 .chip { display: inline-block; border: 1px solid var(--line); background: var(--card); color: var(--muted);
   padding: 2px 9px; margin: 0 6px 6px 0; border-radius: 3px; font-size: 12px; white-space: nowrap; }
 .chip b { color: var(--ink); font-weight: 600; margin-left: 3px; font-variant-numeric: tabular-nums; }
@@ -919,6 +921,12 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     gr.HTML("<div id='head'><div class='mark'></div><div><h1>Mooney Studio</h1><div class='sub'>Two-tone face images, "
             "and what vision systems make of them</div></div></div>")
     status = gr.HTML(status_html())
+    with gr.Row(elem_id="saverun", equal_height=True):
+        r_run_name = gr.Textbox("", show_label=False, container=False, scale=2, min_width=220,
+                                placeholder="Name for a saved run, for example: final run")
+        r_run_save = gr.Button("Save run", size="sm", scale=0, min_width=110)
+        r_run_msg = gr.Markdown("Saves everything except the photos (Mooneys, values, all results, figures, subset, 3D) "
+                                "to `runs/<date>_<name>/`.", elem_classes="hint", elem_id="saverun-msg")
 
     with gr.Tabs():
         # ------------------------------------------------------------------ Overview
@@ -1106,13 +1114,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                 r_next = gr.Button("Next →", size="sm", scale=1)
             r_panel = gr.Image(label="Original and Mooney with each system's output", height=520)
             r_detail = gr.Markdown(elem_classes="prose")
-            gr.Markdown("### Keep this run\n<span class='hint'>Copies the Mooneys, their values and every result table to "
-                        "`runs/<date>_<name>/`, so you can change the settings, run again and compare both in **Analysis**. "
-                        "The photos themselves are not copied.</span>", elem_classes="prose")
-            with gr.Row():
-                r_run_name = gr.Textbox("", label="Save this run as…", placeholder="for example: blur 6, 25 % white", scale=3)
-                r_run_save = gr.Button("Save run", size="md", scale=1)
-            r_run_msg = gr.Markdown(elem_classes="hint")
+            gr.Markdown("<span class='hint'>To keep this state, use **Save run** at the top of the page. Saved runs can be compared "
+                        "in **Analysis**.</span>", elem_classes="prose")
 
         # ------------------------------------------------------------------ Analysis
         with gr.Tab("Analysis") as tab_analysis:

@@ -507,7 +507,8 @@ def export(project, by):
 
 # ============================================================================ saved runs
 CURRENT = "current"
-RUN_PARTS = ["Mooney", "Result1", "Result2", "Result3", "Result4", "analysis"]            # folders copied into a run
+RUN_PARTS = ["Mooney", "Result1", "Result2", "Result3", "Result4", "Result5", "analysis", "figures", "Subset",
+             "3D", "3D_basel"]                                                             # folders copied into a run
 RUN_FILES = ["params.csv", "settings.json", "favorites.json", "dataset.csv"]              # files copied into a run
 
 
@@ -546,9 +547,9 @@ def run_slug(name):
 
 def save_run(project, runs_dir, name):
     """
-    Freeze the current Mooneys and results as runs/<date>_<name>/: Mooney/, Result1..4/, analysis/, params.csv,
-    settings.json, favorites.json, dataset.csv, and run.json (settings, counts, date). The photos themselves are
-    not copied; run.json lists them. Returns (folder name, message). An existing run of the same name is kept:
+    Freeze the current state as runs/<date>_<name>/: Mooney/, Result1..5/, analysis/, figures/, Subset/, the two 3D
+    branches, params.csv, settings.json, favorites.json, dataset.csv, and run.json (settings, counts, date). The
+    collected photos in Original/ are not copied; run.json lists them. Returns (folder name, message). An existing run of the same name is kept:
     the new one gets a number at the end.
     """
     slug = run_slug(name)
