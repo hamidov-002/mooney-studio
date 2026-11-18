@@ -34,7 +34,7 @@ folder has its own project.
 The strip of counters under the title shows where the project stands on every tab. The Overview tab says
 what to do next.
 
-## 1 Dataset
+## Dataset
 
 Photos come from Wikimedia Commons. For each name the collector looks at up to 80 files and keeps a photo
 only if all of these hold:
@@ -63,7 +63,7 @@ and a person with one photo left gets only the missing one.
 **Reading the log.** One line per person: `+` photos added, `=` already complete, `-` skipped (with the
 reasons), `!` Commons did not answer. A summary line closes the run.
 
-## 2 Batch
+## Batch
 
 The generator has four phases:
 
@@ -103,7 +103,7 @@ face brightness, and `mode` (`batch` or `manual`).
 **Quality score** (used only by Sweep): fidelity × simplicity. Fidelity is how well the black/white borders
 of the Mooney follow the strong edges of the photo; simplicity rewards few, large regions.
 
-## 3 Mooney
+## Mooney
 
 One photo at a time, with all four phases visible. Use *Previous* and *Next* to step through the folder.
 Changing a slider redraws the Mooney at once. The line under the buttons shows the white share reached, the
@@ -117,7 +117,7 @@ threshold and the face brightness.
 When ten favourites are marked, press *Save favourites to Subset/* in the Batch tab. The pairs are copied to
 `Subset/Original` and `Subset/Mooney`.
 
-## 4 Vision systems
+## Vision systems
 
 Every system takes each original and its Mooney and returns values for both. Nothing about who the person
 is is asked at this stage.
@@ -144,9 +144,9 @@ Notes:
   value whether it comes straight from a model, is one of our settings, or is calculated by us.
 
 Under *Later steps*: identity matching (does the system recognise the person?) and system 5, the 3D face
-mesh. Both are switched off by default. The controlled 3D experiment has its own tab, *6 3D faces*.
+mesh. Both are switched off by default. The controlled 3D experiment has its own tab, *3D faces*.
 
-## 5 Results
+## Results
 
 - **Summary table**: one row per measure, with columns Original, Mooney and Mooney re-blurred. Counts are
   images; other values are means.
@@ -158,7 +158,7 @@ mesh. Both are switched off by default. The controlled 3D experiment has its own
   `runs/<date>_<name>/` and writes `run.json` there (the values the Mooneys were made with, counts, date, the
   list of photos). The photos themselves are not copied. Saving twice under one name keeps both.
 
-**Working with runs.** Save the run, change the settings in 2 Batch, generate again, run the systems again,
+**Working with runs.** Save the run, change the settings in Batch, generate again, run the systems again,
 save under another name. Then compare the runs in the Analysis tab.
 
 ## Analysis
@@ -186,7 +186,7 @@ table is the Results summary with one column per run. The second shows what each
 with, read from the run's `params.csv`: blur, white target, white share reached, background, preprocessing,
 how many were adjusted by hand. Check there that the runs cover the same photos before reading differences.
 
-## 6 3D faces
+## 3D faces
 
 A controlled version of the experiment. A photo tells us nothing certain about the light or the shape of the
 face. A picture we draw ourselves does: we choose the light, and we know the depth of every pixel.
@@ -207,7 +207,7 @@ The first source is described next, the Basel source after it.
    smoothed) and drawn as a matte surface under each chosen light: front, left 45°, right 45°, top, below.
    The head pose is the one in the photo.
 2. *Make Mooneys.* The renders go through the same generator as the photos, with the values saved as defaults
-   in 2 Batch.
+   in Batch.
 3. *Run systems 1, 3 and 4* on the renders and their Mooneys, then compare with the truth.
 
 *Run all three steps* does them in order. Step 1 replaces earlier renders together with their Mooneys and
@@ -345,7 +345,7 @@ project/
   params.csv           values used for every Mooney
   settings.json        saved defaults
   favorites.json       favourites
-  identities.txt       the names last entered in 1 Dataset
+  identities.txt       the names last entered in Dataset
   rejected.csv         photos removed by hand
   _removed/            the removed photos themselves
   3D/                  3D faces reconstructed from photos: same layout again, plus truth/
@@ -380,7 +380,7 @@ ollama pull llava:7b
 ```
 
 **Settings.** All defaults are in `config.py`. To change some, copy `config.example.json` to `config.json`
-and keep only the lines you need; `python config.py` lists every setting. The values you save in 2 Batch are
+and keep only the lines you need; `python config.py` lists every setting. The values you save in Batch are
 stored per project in `settings.json` and take precedence over the generation defaults in `config.py`.
 
 `README.md` covers installation, the working folder and making the app reachable from another computer.

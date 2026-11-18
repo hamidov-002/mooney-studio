@@ -68,13 +68,13 @@ Switching does not move anything: each working folder has its own project.
 | Tab | What it does |
 |---|---|
 | Overview | where the project stands, what to do next, where the data is kept |
-| 1 Dataset | collect openly licensed portraits from Wikimedia Commons, review them, remove bad ones |
-| 2 Batch | one Mooney per photo with the same settings |
-| 3 Mooney | adjust single photos by hand, mark favourites |
-| 4 Vision systems | face model, vision-language model, learned depth, depth from shading |
-| 5 Results | summary table, figure, per-photo viewer; save the run under a name |
+| Dataset | collect openly licensed portraits from Wikimedia Commons, review them, remove bad ones |
+| Batch | one Mooney per photo with the same settings |
+| Mooney | adjust single photos by hand, mark favourites |
+| Vision systems | face model, vision-language model, learned depth, depth from shading |
+| Results | summary table, figure, per-photo viewer; save the run under a name |
 | Analysis | results by properties of the photos; compare saved runs |
-| 6 3D faces | renders with known light and depth (from your photos or from the Basel Face Model), their Mooneys, the systems against the truth, comparison of the stimulus sets |
+| 3D faces | renders with known light and depth (from your photos or from the Basel Face Model), their Mooneys, the systems against the truth, comparison of the stimulus sets |
 | Notes | your own Markdown notes from the working folder (only if there are any) |
 | Docs | the manual |
 
@@ -123,7 +123,7 @@ put it on the open internet without the login.
 
 ## Optional: the Basel Face Model
 
-The *6 3D faces* tab can draw invented faces from the Basel Face Model 2019. **The model is not included in
+The *3D faces* tab can draw invented faces from the Basel Face Model 2019. **The model is not included in
 this repository.** It is free for non-commercial research after registration, and it may not be
 redistributed, so everyone has to get their own copy:
 

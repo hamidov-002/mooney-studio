@@ -173,7 +173,7 @@ to the mesh from the original. Results go to `Result5/`.
 
 ## 3D faces: the systems against known truth
 
-In the *6 3D faces* tab systems 1, 3 and 4 run unchanged on renders and on the Mooneys of those renders. All
+In the *3D faces* tab systems 1, 3 and 4 run unchanged on renders and on the Mooneys of those renders. All
 values above keep their meaning, with "original" read as "render". Two values are added, both calculated by
 us and stored in `3D/analysis/truth_scores.csv`:
 
