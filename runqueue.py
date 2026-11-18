@@ -2,8 +2,10 @@
 A queue of experiments that run one after another without anyone watching.
 
 The queue is a file, <project>/queue.json, so it survives a restart of the app:
-    {"items": [{"id", "name", "config", "state", "added", "started", "finished", "minutes", "message", "log"}]}
-state is one of: waiting, running, done, failed, stopped.
+    {"items": [{"id", "name", "group", "config", "state", "added", "started", "finished", "minutes", "message", "log",
+                "stages": [{"title", "state", "detail"}], "fraction"}]}
+state is one of: waiting, running, done, failed, stopped. Runs belong to a group; a group can be run on its own.
+While a run works, its log, stages and fraction are kept in memory and written to the file every few seconds.
 A run that raises StopNow (the user pressed Stop now) is marked stopped and the queue halts; the items after it stay waiting.
 
 This module only keeps the list and runs it. What one experiment does is given by the caller as
@@ -21,8 +23,12 @@ WAITING, RUNNING, DONE, FAILED, STOPPED = "waiting", "running", "done", "failed"
 
 class StopNow(BaseException):
     """Raised inside a run when the user stops it. Not an Exception, so no 'except Exception' in the work swallows it."""
-_lock = threading.Lock()
+
+
+_lock = threading.RLock()
 _worker = {"thread": None, "stop": False}
+_live = {"id": None, "log": [], "stages": [], "fraction": 0.0, "t0": 0.0, "written": 0.0}     # the run that is working now
+DEFAULT_GROUP = "main"
 
 
 def _path(project):
@@ -35,12 +41,35 @@ def load(project):
         d.setdefault("items", [])
     except Exception:
         d = {"items": []}
+    for it in d["items"]:
+        it.setdefault("group", DEFAULT_GROUP); it.setdefault("stages", []); it.setdefault("fraction", 0)
+        it.setdefault("log", []); it.setdefault("minutes", ""); it.setdefault("message", "")
     # an item left 'running' by a closed app did not finish
     if not is_running():
         for it in d["items"]:
             if it.get("state") == RUNNING:
                 it["state"], it["message"] = STOPPED, "the app was closed while it ran"
     return d
+
+
+def snapshot(project):
+    """The items as the app should show them: the file, with the run that is working now taken from memory."""
+    items = load(project)["items"]
+    if is_running() and _live["id"]:
+        for it in items:
+            if it["id"] == _live["id"]:
+                it["log"], it["stages"], it["fraction"] = list(_live["log"][-300:]), [dict(s) for s in _live["stages"]], _live["fraction"]
+                it["minutes"] = f"{(time.time() - _live['t0']) / 60:.1f}"
+    return items
+
+
+def groups(project):
+    """Group names in the order they first appear in the queue."""
+    out = []
+    for it in load(project)["items"]:
+        if it["group"] not in out:
+            out.append(it["group"])
+    return out
 
 
 def _save(project, d):
@@ -50,15 +79,48 @@ def _save(project, d):
     os.replace(tmp, _path(project))
 
 
-def add(project, name, config):
-    """Put one experiment at the end of the queue. Returns its id."""
+def add(project, name, config, group=None, stages=None):
+    """Put one experiment at the end of the queue (after the last item of its group, if the group exists). Returns its id."""
     with _lock:
         d = load(project)
-        it = {"id": uuid.uuid4().hex[:8], "name": str(name).strip(), "config": config, "state": WAITING,
-              "added": time.strftime("%Y-%m-%d %H:%M"), "started": "", "finished": "", "minutes": "", "message": "", "log": []}
-        d["items"].append(it)
+        group = str(group or DEFAULT_GROUP).strip() or DEFAULT_GROUP
+        it = {"id": uuid.uuid4().hex[:8], "name": str(name).strip(), "group": group, "config": config, "state": WAITING,
+              "added": time.strftime("%Y-%m-%d %H:%M"), "started": "", "finished": "", "minutes": "", "message": "", "log": [],
+              "stages": [{"title": t, "state": WAITING, "detail": ""} for t in (stages or [])], "fraction": 0}
+        last = max((k for k, x in enumerate(d["items"]) if x["group"] == group), default=None)
+        d["items"].insert(len(d["items"]) if last is None else last + 1, it)
         _save(project, d)
         return it["id"]
+
+
+def get(project, item_id):
+    return next((it for it in snapshot(project) if it["id"] == item_id), None)
+
+
+def replace_config(project, item_id, name, config, group=None, stages=None):
+    """Change a waiting item in place (its position is kept). False if it is not waiting any more."""
+    with _lock:
+        d = load(project)
+        for it in d["items"]:
+            if it["id"] == item_id and it["state"] == WAITING:
+                it.update(name=str(name).strip(), config=config, group=str(group or it["group"]).strip() or DEFAULT_GROUP,
+                          stages=[{"title": t, "state": WAITING, "detail": ""} for t in (stages or [])])
+                _save(project, d)
+                return True
+        return False
+
+
+def requeue(project, item_id):
+    """Set a finished, failed or stopped item back to waiting, so it can run again."""
+    with _lock:
+        d = load(project)
+        for it in d["items"]:
+            if it["id"] == item_id and it["state"] in (DONE, FAILED, STOPPED):
+                it.update(state=WAITING, started="", finished="", minutes="", message="", log=[], fraction=0,
+                          stages=[{"title": s["title"], "state": WAITING, "detail": ""} for s in it.get("stages", [])])
+                _save(project, d)
+                return True
+        return False
 
 
 def remove(project, item_id):
@@ -73,7 +135,7 @@ def remove(project, item_id):
 
 
 def move(project, item_id, step):
-    """Move a waiting item up (step -1) or down (step +1) among the waiting items."""
+    """Move a waiting item up (step -1) or down (step +1) among the waiting items of its group."""
     with _lock:
         d = load(project)
         items = d["items"]
@@ -81,7 +143,7 @@ def move(project, item_id, step):
         if i is None or items[i]["state"] != WAITING:
             return False
         j = i + step
-        while 0 <= j < len(items) and items[j]["state"] != WAITING:
+        while 0 <= j < len(items) and (items[j]["state"] != WAITING or items[j]["group"] != items[i]["group"]):
             j += step
         if not 0 <= j < len(items):
             return False
@@ -116,29 +178,54 @@ def _update(project, item_id, **fields):
         _save(project, d)
 
 
-def start(project, run_one):
-    """Run every waiting item, oldest first, in a background thread. Returns False if the queue already runs."""
+def _flush(project, force=False):
+    """Write the working run's log, stages and fraction to the file, at most every two seconds."""
+    if _live["id"] and (force or time.time() - _live["written"] > 2):
+        _live["written"] = time.time()
+        _update(project, _live["id"], log=list(_live["log"][-300:]), stages=[dict(s) for s in _live["stages"]],
+                fraction=round(float(_live["fraction"]), 3))
+
+
+def start(project, run_one, group=None, only=None):
+    """
+    Run waiting items, oldest first, in a background thread: all of them, those of one group, or the single item `only`.
+    run_one(config, log, report) does one run and returns the line shown for it; report(stages=None, fraction=None)
+    tells the queue where the run is (stages: list of {"title", "state", "detail"}).
+    Returns False if the queue already runs.
+    """
     if is_running():
         return False
     _worker["stop"] = False
 
+    def wanted(it):
+        return it["state"] == WAITING and (only is None or it["id"] == only) and (group is None or it["group"] == group)
+
     def work():
         while not _worker["stop"]:
-            d = load(project)
-            nxt = next((it for it in d["items"] if it["state"] == WAITING), None)
+            nxt = next((it for it in load(project)["items"] if wanted(it)), None)
             if nxt is None:
                 break
-            lines = []
+            lines = _live["log"] = []
+            _live.update(id=nxt["id"], stages=[dict(s) for s in nxt.get("stages", [])], fraction=0.0, t0=time.time(), written=0.0)
 
             def log(msg=""):
                 lines.append(f"{time.strftime('%H:%M:%S')}  {msg}" if str(msg).strip() else "")
-                if len(lines) % 10 == 0:                     # keep the file current without writing on every line
-                    _update(project, nxt["id"], log=lines[-300:])
+                _flush(project)
 
-            t0 = time.time()
-            _update(project, nxt["id"], state=RUNNING, started=time.strftime("%Y-%m-%d %H:%M"), message="", log=[])
+            def report(stages=None, fraction=None):
+                if stages is not None:
+                    _live["stages"] = [dict(s) for s in stages]
+                if fraction is not None:
+                    _live["fraction"] = float(fraction)
+                _flush(project)
+
+            t0, extra = time.time(), {}
+            _update(project, nxt["id"], state=RUNNING, started=time.strftime("%Y-%m-%d %H:%M"), message="", log=[], fraction=0)
             try:
-                msg = run_one(nxt["config"], log) or "finished"
+                msg = run_one(nxt["config"], log, report) or "finished"
+                if isinstance(msg, dict):                    # {"message": ..., "folder": ...}: extra facts are kept with the item
+                    extra = {k: v for k, v in msg.items() if k != "message"}
+                    msg = msg.get("message") or "finished"
                 state = DONE
             except StopNow:                                  # stopped by the user: this run is marked, the rest stays waiting
                 lines.extend(["", "STOPPED BY YOU. What was written so far stays as it is; the run was not saved."])
@@ -148,8 +235,16 @@ def start(project, run_one):
                 tb = traceback.format_exc().strip().splitlines()
                 lines.extend(["", "STOPPED WITH AN ERROR"] + tb[-12:])
                 msg, state = tb[-1], FAILED
+            for s in _live["stages"]:                        # a stage that was working when the run ended did not finish
+                if s.get("state") == RUNNING:
+                    s["state"] = STOPPED if state == STOPPED else FAILED if state == FAILED else DONE
             _update(project, nxt["id"], state=state, finished=time.strftime("%Y-%m-%d %H:%M"),
-                    minutes=f"{(time.time() - t0) / 60:.1f}", message=msg, log=lines[-300:])
+                    minutes=f"{(time.time() - t0) / 60:.1f}", message=msg, log=lines[-300:],
+                    stages=[dict(s) for s in _live["stages"]], fraction=1.0 if state == DONE else round(float(_live["fraction"]), 3),
+                    **extra)
+            _live["id"] = None
+            if only is not None:
+                break
 
     t = threading.Thread(target=work, daemon=True)
     _worker["thread"] = t

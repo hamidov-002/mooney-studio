@@ -20,8 +20,10 @@ Start: `./setup.sh` once, then `./run.sh` (or `python app.py`), open http://127.
 | `batch.py` | one Mooney per photo with one set of values; writes `params.csv` |
 | `vision.py` | the vision systems, one `run_*` function each; each writes `ResultN/` and `analysis/resultN_*.csv` plus a protocol JSON |
 | `results.py` | summary table, figure, per-photo panels |
-| `analysis.py` | analysis by photo properties, saved runs (`save_run`, `list_runs`, `compare_runs`) |
-| `runqueue.py` | the queue of runs: a list in `project/queue.json` and a thread that runs it; knows nothing about what a run does |
+| `analysis.py` | analysis by photo properties, saved runs (`save_run`, `list_runs`, `compare_runs`), the scores of a run in a fixed format (`run_scores`, `scores.json`, the index of all runs) |
+| `runqueue.py` | the queue of runs: a list in `project/queue.json` (runs in groups, with stage states) and a thread that runs it; knows nothing about what a run does |
+| `publish.py` | copies the numbers of a project or saved run to `data/<name>/` for the repository: tables only, with a guard against pictures |
+| `runboard.py` | the pictures of the Runs page as HTML (stage cards, board of groups, history) with their CSS and the click script; no data access |
 | `face3d.py` | 3D faces reconstructed from photos (MediaPipe mesh), renders, true depth |
 | `bfm.py`, `bfm_fit.py` | Basel Face Model: invented faces and faces fitted to photos; renderer with cast shadows |
 | `analysis3d.py` | systems against the true depth, comparison of the stimulus sets |
@@ -41,7 +43,7 @@ A menu on the left with six sections; each section is a `gr.Column` whose visibi
 | Home | status, next step, working folder |
 | Dataset | Photos · Subsets · 3D datasets |
 | Mooney | Batch · By hand |
-| Experiments | Vision systems · One-button run · Queue · Saved runs |
+| Experiments | Vision systems · Runs (new run as stage cards · groups and queue · history) |
 | Analysis | Results · By photo properties · Compare runs · 3D comparison |
 | Docs | Manual · Vision systems · References · Notes |
 
@@ -68,7 +70,9 @@ overflow logic hides tabs that do not fit the narrow column.
    - The Basel Face Model `.h5` files are licensed to one person for non-commercial research. Never commit,
      upload, copy elsewhere or share them, and never put them where they could be published.
    - Photos keep their own licences (recorded in `dataset.csv`); they are never part of the repository.
-   - No pictures of real people and no Basel renders in the repository.
+   - No pictures of real people and no Basel renders in the repository. `data/` holds published results as
+     tables only (scores, settings, per-photo CSVs, two charts without faces); it is written by `publish.py`,
+     and `publish.check(folder)` must return nothing for anything put there.
 6. **No race or ethnicity** is asked, stored or inferred anywhere.
 7. **Public functions keep their names and arguments.** Add optional arguments only.
 
@@ -81,8 +85,8 @@ overflow logic hides tabs that do not fit the narrow column.
    - Gradio keeps only the visible page in the DOM: open a section with
      `page.getByRole('button', {name, exact: true})`, a page with `page.getByRole('tab', {name, exact: true})`.
    - Labels repeat between pages; prefer `getByRole('checkbox' | 'button', {name})` over `getByLabel`.
-   - Look at light and dark (`?__theme=dark`), at 1440 px and about 1280 px wide; no page errors, no
-     tracebacks in the log.
+   - Look at 1440 px and about 1280 px wide; no page errors, no tracebacks in the log. The app is light only:
+     with the browser set to dark, or `?__theme=dark` in the address, the page must still be the light one.
 4. Check rule 2 if anything near generation or the systems was touched.
 5. Update `docs/MANUAL.md` (how to use), `docs/VISION_SYSTEMS.md` (what a value means), README if setup changes.
 6. Commit with a message that says what changed and why.
@@ -101,11 +105,25 @@ overflow logic hides tabs that do not fit the narrow column.
   section; wiring at the end, with an entry in that section's `pages(...)` call. Long work goes through
   `run_logged(job, n_outputs, final, what=...)` so it streams a readable log, is refused while another job
   works, and can be stopped; put a Stop button next to its start button.
-- **A new step of the one-button run:** add it to `pipeline_steps` and a key to `pipeline_config`; the queue
-  then runs it too, because both call `pipeline_job`.
+- **A new stage or step of a run:** a run is a plain dict made by `run_config`; `run_steps` turns it into
+  `(title, weight, fn(log, prog))` steps and `run_stage_titles` names their chips (keep the two in step);
+  `queue_run_one` runs them and reports stage states to the queue. Add the field to `run_config`, `r_fill` and
+  the form, and a summary line in `r_summaries`. `pipeline_steps` is only there for queue items of the old shape.
+- **The Runs page pictures** are custom HTML components: `gr.HTML(value, js_on_load=rb.JS)`. `runboard.py`
+  builds the HTML; anything clickable carries `data-act` (and `data-id`, `data-group`, `data-stage`), the script
+  turns a click into a Gradio click event, and the handler reads `evt._data`. The timer redraws a picture only
+  when its HTML changed, so open logs and the scroll position stay.
+- **A new score:** add it to `run_scores` in `analysis.py` (read it from a result table, never compute again),
+  to `score_row` if it belongs in the index, and to the table in the manual; keep `schema` or raise its number
+  if a field changes meaning.
 
 ## Style
 
 - Plain, short wording in the interface and the docs; say what a button does and where results are written.
 - Logs: one line per step, clock time in front, errors shown in the log and never swallowed.
-- Colours and type are set once in `THEME`/`CSS` in `app.py`; reuse the CSS variables.
+- The look is a white page set like a paper, light only (no dark variant, on purpose): serif (Source Serif 4,
+  Georgia) for the title, headings and document text; IBM Plex Sans for controls and tables; mono only for logs
+  and file names; one accent, a deep ink blue; soft status colours (done, running, waiting, failed).
+- Colours and type are set once in `THEME`/`CSS` in `app.py` (and `runboard.CSS`); reuse the CSS variables.
+  Tables carry a rule above and below and light lines between rows, no boxes. Charts use the three series
+  colours in `results.COLORS` / `analysis.BLUE, ORANGE, GREEN` and always carry labels.

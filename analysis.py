@@ -29,8 +29,8 @@ import time
 import numpy as np
 from PIL import Image
 
-INK, MUTED, GRID = "#1b1f24", "#5b6672", "#e4e8ed"
-BLUE, ORANGE, GREEN = "#2a78d6", "#eb6834", "#1baf7a"           # Original, Mooney, Mooney re-blurred (fixed everywhere)
+INK, MUTED, GRID = "#15181d", "#5c6672", "#e6e9ed"
+BLUE, ORANGE, GREEN = "#2b5a9e", "#d9622b", "#1f9a6e"           # Original, Mooney, Mooney re-blurred (fixed everywhere)
 FEW = 10                                                        # groups with fewer photos are flagged
 
 VALUES = {"det_conf": "Detector confidence (original)", "sim": "Similarity to original (Mooney)",
@@ -514,7 +514,7 @@ RUN_FILES = ["params.csv", "settings.json", "favorites.json", "subsets.json", "d
 RUN_GROUPS = {
     "results": ("Vision system results and tables", ["Result1", "Result2", "Result3", "Result4", "Result5", "analysis"]),
     "figures": ("Exported figures", ["figures"]),
-    "subset": ("Subset", ["Subset", "Subsets"]),
+    "subset": ("Subsets", ["Subset", "Subsets"]),
     "3d": ("3D faces from photos", ["3D"]),
     "fit": ("3D faces fitted with the Basel Face Model", ["3D_basel_fit"]),
     "basel": ("3D faces from the Basel Face Model", ["3D_basel"]),
@@ -563,12 +563,14 @@ def _size_mb(folder):
     return total / 1e6
 
 
-def save_run(project, runs_dir, name, include=None, note=""):
+def save_run(project, runs_dir, name, include=None, note="", group="", run=None):
     """
     Freeze the current state as runs/<date>_<name>/. Always kept: Mooney/, params.csv, settings.json,
     favorites.json, dataset.csv and run.json (settings, counts, date, what was included, the note).
     include: keys of RUN_GROUPS to copy as well (None = RUN_DEFAULT: everything except the photos).
     note: free text stored in run.json. The photos are listed in run.json whether they are copied or not.
+    group: the group of runs this one belongs to; run: a plain description of what the run did (source, stages).
+    Both are only written to run.json.
     Returns (folder name, message). An existing run of the same name is kept: the new one gets a number at the end.
     """
     slug = run_slug(name)
@@ -597,12 +599,16 @@ def save_run(project, runs_dir, name, include=None, note=""):
         pass
     src = os.path.join(project, "Original")
     info = {"name": str(name).strip(), "folder": folder, "saved": time.strftime("%Y-%m-%d %H:%M"),
-            "note": str(note or "").strip(), "included": include,
+            "note": str(note or "").strip(), "group": str(group or "").strip(), "run": run or {}, "included": include,
             "saved_defaults": settings, "used": used_settings(project),
             "counts": {p: _count(os.path.join(dst, p, "Mooney")) if p.startswith("Result") else _count(os.path.join(dst, p))
                        for p in RUN_PARTS},
             "photos": sorted(os.path.splitext(f)[0] for f in os.listdir(src) if not f.startswith(".")) if os.path.isdir(src) else []}
     json.dump(info, open(os.path.join(dst, "run.json"), "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    try:                                                    # the scores in a fixed format, and the index of all runs
+        write_scores(dst); write_scores_index(runs_dir)
+    except Exception:
+        pass
     done = [f"system {p[-1]}" for p in RUN_PARTS if p.startswith("Result") and info["counts"][p]]
     has = lambda k: any(os.path.isdir(os.path.join(dst, p)) for p in RUN_GROUPS[k][1])
     kept = [RUN_GROUPS[k][0] for k in include if k != "results" and has(k)]
@@ -616,6 +622,202 @@ def save_run(project, runs_dir, name, include=None, note=""):
     if "results" not in include:
         msg += " Without the result tables this run cannot be used in Compare runs."
     return folder, msg
+
+
+# ---------------------------------------------------------------------------- scores of a run in a fixed format
+SCORES_SCHEMA = "mooney-studio.scores/1"
+SCORES_FILE, INDEX_JSON, INDEX_CSV = "scores.json", "scores_index.json", "scores_index.csv"
+_SETS_3D = ["3D", "3D_basel_fit", "3D_basel"]
+
+
+def _r4(x):
+    return None if x is None else round(float(x), 4)
+
+
+def _stats(values):
+    v = [x for x in values if x is not None]
+    if not v:
+        return None
+    return {"mean": _r4(np.mean(v)), "median": _r4(np.median(v)), "min": _r4(min(v)), "max": _r4(max(v)), "n": len(v)}
+
+
+def _depth_block(rows):
+    pair = [r for r in rows if r.get("depth_correlation_original_vs_mooney") not in (None, "")]
+    if not pair:
+        return None
+    return {"n": len(pair), "mooney_vs_original": _stats([_num(r.get("depth_correlation_original_vs_mooney")) for r in pair]),
+            "mooney_vs_original_centre": _stats([_num(r.get("depth_correlation_centre_crop")) for r in pair])}
+
+
+def run_scores(path):
+    """
+    The scores of one run (a saved run folder, or a project) as one dict in a fixed shape, read from the result
+    tables the run already holds. Nothing is computed again and nothing is written. A block whose table is absent
+    is left out; numbers are numbers, rounded to 4 decimals; null where a value does not exist.
+    """
+    try:
+        j = json.load(open(os.path.join(path, "run.json"), encoding="utf-8"))
+    except Exception:
+        j = {}
+    used = j.get("used") or (used_settings(path) if os.path.exists(os.path.join(path, "params.csv")) else {})
+    params = _csv(path, "params.csv")
+    out = {"schema": SCORES_SCHEMA,
+           "run": {"name": j.get("name", os.path.basename(path.rstrip(os.sep))), "group": j.get("group", ""),
+                   "folder": j.get("folder", os.path.basename(path.rstrip(os.sep))), "saved": j.get("saved", ""), "note": j.get("note", ""),
+                   "source": (j.get("run") or {}).get("source", "")},
+           "settings": used,
+           "photos": {"n": len(j["photos"]) if j.get("photos") else (_count(os.path.join(path, "Original")) or None),
+                      "mooneys": _count(os.path.join(path, "Mooney")), "adjusted_by_hand": sum(1 for r in params if r.get("mode") == "manual")},
+           "systems": {}, "sets_3d": {}}
+    f = _csv(path, "analysis", "result1_face.csv")
+    if f:
+        o = [r for r in f if r.get("condition") == "Original"]; m = [r for r in f if r.get("condition") == "Mooney"]
+        out["systems"]["1_face_model"] = {
+            "n": len(m) or len(o),
+            "face_detected": {"original": sum(1 for r in o if _yes(r.get("face_detected"))), "original_n": len(o),
+                              "mooney": sum(1 for r in m if _yes(r.get("face_detected"))), "mooney_n": len(m),
+                              "mooney_reblurred": sum(1 for r in m if _yes(r.get("reblur_face_detected")))},
+            "similarity_to_own_original": {"mooney": _stats([_num(r.get("similarity_to_own_original")) for r in m]),
+                                           "mooney_reblurred": _stats([_num(r.get("reblur_similarity_to_own_original")) for r in m])}}
+    v = _csv(path, "analysis", "result2_vlm.csv")
+    if v:
+        o = [r for r in v if r.get("condition") == "Original"]; m = [r for r in v if r.get("condition") == "Mooney"]
+        out["systems"]["2_vision_language_model"] = {
+            "n_original": len(o), "n_mooney": len(m), "model": v[0].get("model", ""),
+            "face_present_yes": {"original": sum(1 for r in o if r.get("face_present") == "yes"),
+                                 "mooney": sum(1 for r in m if r.get("face_present") == "yes")}}
+    for key, name in (("3_learned_depth", "result3_depth.csv"), ("4_depth_from_shading", "result4_shading.csv")):
+        block = _depth_block(_csv(path, "analysis", name))
+        if block:
+            out["systems"][key] = block
+    for sub in _SETS_3D:
+        if os.path.isdir(os.path.join(path, sub, "Original")):
+            block = _scores_3d(path, sub)
+            if block:
+                out["sets_3d"][sub] = block
+    return out
+
+
+def _scores_3d(path, sub):
+    """The block of one 3D set: counts, faces found, depth against the truth, and the same by light direction."""
+    import analysis3d as a3                                 # here, because analysis3d imports this module
+    try:
+        recs = a3.per_render(path, sub)
+    except Exception:
+        return None
+    if not recs:
+        return None
+
+    def count(rows, key):
+        v = [r[key] for r in rows if r.get(key) is not None]
+        return {"yes": int(sum(v)), "n": len(v)} if v else None
+
+    def mean(rows, key):
+        v = [r[key] for r in rows if r.get(key) is not None]
+        return _r4(np.mean(v)) if v else None
+
+    def block(rows):
+        return {"renders": len(rows),
+                "face_detected": {"render": count(rows, "det_render"), "mooney": count(rows, "det_mooney"),
+                                  "mooney_reblurred": count(rows, "det_reblur")},
+                "similarity_mooney_to_render": mean(rows, "sim_mooney_render"),
+                "depth_vs_truth": {"3_learned_depth": {"render": mean(rows, "d3_render"), "mooney": mean(rows, "d3_mooney")},
+                                   "4_depth_from_shading": {"render": mean(rows, "d4_render"), "mooney": mean(rows, "d4_mooney")}}}
+    lights = []
+    for r in recs:
+        if r["light"] not in lights:
+            lights.append(r["light"])
+    out = block(recs)
+    out["mooneys"] = _count(os.path.join(path, sub, "Mooney"))
+    out["by_light"] = [{"light": l, **block([r for r in recs if r["light"] == l])} for l in lights]
+    return out
+
+
+def has_scores_source(path):
+    """Whether a run folder holds any result table to read scores from."""
+    return (os.path.isdir(os.path.join(path, "analysis"))
+            or any(os.path.isdir(os.path.join(path, sub, "analysis")) for sub in _SETS_3D))
+
+
+def write_scores(path):
+    """Write <run>/scores.json from the run's own tables. Returns the dict. Nothing else in the run is touched."""
+    d = run_scores(path)
+    tmp = os.path.join(path, SCORES_FILE + ".tmp")
+    json.dump(d, open(tmp, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    os.replace(tmp, os.path.join(path, SCORES_FILE))
+    return d
+
+
+def read_scores(path):
+    try:
+        return json.load(open(os.path.join(path, SCORES_FILE), encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def score_row(d):
+    """The key numbers of one run as a flat dict: one row of scores_index.csv."""
+    s, t = d.get("systems", {}), d.get("sets_3d", {})
+    f, v = s.get("1_face_model") or {}, s.get("2_vision_language_model") or {}
+    fd, sim = f.get("face_detected") or {}, f.get("similarity_to_own_original") or {}
+    row = {"folder": d["run"].get("folder", ""), "name": d["run"].get("name", ""), "group": d["run"].get("group", ""),
+           "saved": d["run"].get("saved", ""), "source": d["run"].get("source", ""), "note": d["run"].get("note", ""),
+           "blur": (d.get("settings") or {}).get("Blur σ (px)", ""), "white_target": (d.get("settings") or {}).get("White target", ""),
+           "background": (d.get("settings") or {}).get("Background", ""),
+           "photos": d["photos"].get("n"), "mooneys": d["photos"].get("mooneys"), "adjusted_by_hand": d["photos"].get("adjusted_by_hand"),
+           "face_original": fd.get("original"), "face_mooney": fd.get("mooney"), "face_mooney_reblurred": fd.get("mooney_reblurred"),
+           "face_n": fd.get("mooney_n"),
+           "similarity_mooney": (sim.get("mooney") or {}).get("mean"), "similarity_mooney_reblurred": (sim.get("mooney_reblurred") or {}).get("mean"),
+           "vlm_face_original": (v.get("face_present_yes") or {}).get("original"), "vlm_face_mooney": (v.get("face_present_yes") or {}).get("mooney"),
+           "vlm_n_mooney": v.get("n_mooney"),
+           "depth3_mooney_vs_original": ((s.get("3_learned_depth") or {}).get("mooney_vs_original") or {}).get("mean"),
+           "depth4_mooney_vs_original": ((s.get("4_depth_from_shading") or {}).get("mooney_vs_original") or {}).get("mean")}
+    for sub in _SETS_3D:
+        b = t.get(sub) or {}
+        dv = b.get("depth_vs_truth") or {}
+        row.update({f"{sub}_renders": b.get("renders"),
+                    f"{sub}_depth3_truth_render": (dv.get("3_learned_depth") or {}).get("render"),
+                    f"{sub}_depth3_truth_mooney": (dv.get("3_learned_depth") or {}).get("mooney"),
+                    f"{sub}_depth4_truth_render": (dv.get("4_depth_from_shading") or {}).get("render"),
+                    f"{sub}_depth4_truth_mooney": (dv.get("4_depth_from_shading") or {}).get("mooney"),
+                    f"{sub}_face_reblurred": ((b.get("face_detected") or {}).get("mooney_reblurred") or {}).get("yes")})
+    return row
+
+
+def write_scores_index(runs_dir):
+    """Rewrite runs/scores_index.json and runs/scores_index.csv from the scores.json of every saved run."""
+    rows = []
+    for d in list_runs(runs_dir):
+        sc = read_scores(os.path.join(runs_dir, d))
+        if sc:
+            rows.append(score_row(sc))
+    if not os.path.isdir(runs_dir):
+        return rows
+    json.dump({"schema": SCORES_SCHEMA + "/index", "written": time.strftime("%Y-%m-%d %H:%M"), "runs": rows},
+              open(os.path.join(runs_dir, INDEX_JSON), "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    with open(os.path.join(runs_dir, INDEX_CSV), "w", newline="", encoding="utf-8") as fh:
+        fields = list(dict.fromkeys(k for r in rows for k in r)) or ["folder"]
+        w = csv.DictWriter(fh, fieldnames=fields); w.writeheader(); w.writerows(rows)
+    return rows
+
+
+def backfill_scores(runs_dir):
+    """Write scores.json for every saved run that has result tables but no scores.json yet, then the index.
+    Returns the folders that were filled. No other file of a run is changed."""
+    done = []
+    for d in list_runs(runs_dir):
+        path = os.path.join(runs_dir, d)
+        if not os.path.exists(os.path.join(path, SCORES_FILE)) and has_scores_source(path):
+            try:
+                write_scores(path); done.append(d)
+            except Exception:                               # a run with unusual tables: leave it without scores
+                pass
+    if done or not os.path.exists(os.path.join(runs_dir, INDEX_JSON)):
+        try:
+            write_scores_index(runs_dir)
+        except Exception:                                   # the index is a convenience; a page must not fail over it
+            pass
+    return done
 
 
 def list_runs(runs_dir):
@@ -667,3 +869,14 @@ def compare_runs(project, runs_dir, names):
     for key in list(used[names[0]]):
         srows.append([key] + [str(used[n].get(key, "–")) for n in names])
     return headers, rows, ["setting"] + names, srows
+
+
+if __name__ == "__main__":                                  # python analysis.py --scores <runs folder>
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == "--scores":
+        filled = backfill_scores(sys.argv[2])
+        rows = write_scores_index(sys.argv[2])
+        print(f"scores.json written for {len(filled)} run(s): {', '.join(filled) or 'none were missing'}")
+        print(f"{INDEX_JSON} and {INDEX_CSV} list {len(rows)} run(s) in {sys.argv[2]}")
+    else:
+        print("usage: python analysis.py --scores <runs folder>")

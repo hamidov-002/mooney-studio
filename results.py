@@ -16,8 +16,8 @@ IMG_EXT = (".jpg", ".jpeg", ".png")
 CONDS = ("Original", "Mooney", "Mooney, re-blurred")
 # categorical slots 1-3 of the validated palette (blue, orange, aqua); aqua is below 3:1 on the
 # light surface, so every bar carries a visible value label and the table shows the same numbers
-COLORS = {"Original": "#2a78d6", "Mooney": "#eb6834", "Mooney, re-blurred": "#1baf7a"}
-SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
+COLORS = {"Original": "#2b5a9e", "Mooney": "#d9622b", "Mooney, re-blurred": "#1f9a6e"}     # the same three everywhere
+SURFACE, INK, INK2, GRID = "#ffffff", "#15181d", "#5c6672", "#e6e9ed"
 
 
 # ----------------------------------------------------------------- reading

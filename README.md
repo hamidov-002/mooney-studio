@@ -72,14 +72,14 @@ The menu on the left has six sections; each has its pages as tabs across the top
 | Home | – | where the project stands, what to do next, where the data is kept |
 | Dataset | Photos · Subsets · 3D datasets | collect openly licensed portraits from Wikimedia Commons and review them; choose pairs into named subsets; make datasets of rendered 3D faces with known light and depth (reconstructed from your photos, the Basel Face Model fitted to them, or invented Basel faces) and keep them under a name |
 | Mooney | Batch · By hand | one Mooney per photo with the same settings; adjust single photos and mark favourites |
-| Experiments | Vision systems · One-button run · Queue · Saved runs | run the ticked systems on the photos or on a 3D dataset; the whole workflow with one button; several runs one after another, unattended; every saved run |
+| Experiments | Vision systems · Runs | run the ticked systems on the photos or on a 3D dataset; build runs from stages, put them into groups, let a group work through its runs unattended, and look through every saved run with its key numbers |
 | Analysis | Results · By photo properties · Compare runs · 3D comparison | summary table, figure and per-photo viewer; results by properties of the photos; saved runs side by side; the systems against the true depth and the stimulus sets compared |
 | Docs | Manual · Vision systems · References · Notes | the manual; where every value comes from; literature, photo credits and use of AI; your own Markdown notes (only if there are any) |
 
 A long job (collecting, Batch, the systems, a run) can be stopped with the Stop button next to it; it ends at
 the image it is working on.
 
-![Experiments → Vision systems](docs/screenshot_systems.png)
+![Experiments → Runs](docs/screenshot_systems.png)
 
 The manual is in [`docs/MANUAL.md`](docs/MANUAL.md); literature and credits are in
 [`docs/REFERENCES.md`](docs/REFERENCES.md); [`AGENTS.md`](AGENTS.md) is for anyone changing the code, with or without a coding agent. For every value the vision systems produce,
@@ -138,6 +138,21 @@ redistributed, so everyone has to get their own copy:
 
 `*.h5` and `models/` are in `.gitignore`. Keep it that way: never commit or share the files or your download
 links. Without the model the rest of the app works as before, and the page says what is missing.
+
+## Results
+
+Published results live in [`data/`](data/README.md): for each published run its scores (`scores.json`), the
+settings, and the per-photo tables of the vision systems. They are tables only; no photo, Mooney, depth map or
+render is in the repository. The app writes them from **Experiments → Runs → History** (*publish*); committing
+is up to you.
+
+To get the code without the data:
+
+```
+git clone --filter=blob:none --sparse https://github.com/hamidov-002/mooney-studio.git
+cd mooney-studio
+git sparse-checkout set --no-cone '/*' '!data'
+```
 
 ## Data and licences
 

@@ -28,7 +28,7 @@ The menu on the left has six sections. Each section has its pages as tabs across
 | **Home** | – | where the project stands, what to do next, where the data is kept |
 | **Dataset** | Photos · Subsets · 3D datasets | what the experiments run on: photos, chosen subsets, rendered 3D faces |
 | **Mooney** | Batch · By hand | making the Mooneys: all at once, or one photo at a time |
-| **Experiments** | Vision systems · One-button run · Queue · Saved runs | running the systems, whole runs, runs in a row, and what was kept |
+| **Experiments** | Vision systems · Runs | running the systems on a dataset; building runs, grouping them, letting them work in a row, and what was kept |
 | **Analysis** | Results · By photo properties · Compare runs · 3D comparison | reading the outcome |
 | **Docs** | Manual · Vision systems · References · Notes | this manual, where every value comes from, sources and credits, your notes |
 
@@ -45,18 +45,20 @@ The usual order of work:
 | 5 | Experiments → Vision systems | The ticked systems run on every original and every Mooney | `Result1/` … `Result4/`, `analysis/` |
 | 6 | Analysis | Summary, figures, analysis by photo properties | `figures/` |
 | 7 | Dataset → 3D datasets, then 5 and 6 again | The same on rendered 3D faces with known light and depth | `3D/`, `3D_basel_fit/`, `3D_basel/` |
-| 8 | Experiments | Save the state as a run; queue several runs; compare them | `runs/` |
+| 8 | Experiments → Runs | Build runs, group them, let a group work through them; every run is saved | `runs/` |
 
-**Experiments → One-button run** does steps 2, 5, 6 and 7 in one go.
+**Experiments → Runs** does steps 2, 5 and 6 for one source in one go, and several such runs in a row.
+
+The app has one look, light, like a printed page; it does not follow a dark system setting.
 
 ### Long jobs: one at a time, and how to stop one
 
-Collecting photos, Batch, the vision systems, a 3D step, a one-button run and the queue are long jobs. Only one
+Collecting photos, Batch, the vision systems, a 3D step and the runs in Experiments → Runs are long jobs. Only one
 of them works at a time; a second one is refused with a line in its log. Each has a **Stop** button next to
 its start button. After Stop the job ends at the image it is working on, and the log says
 `STOPPED BY YOU`. Files written up to that point stay as they are, so the step is only partly done (for
 example Mooneys or results up to that photo); running the step again completes it. A stopped Batch still
-records in `params.csv` what it made. A stopped one-button run is not saved as a run.
+records in `params.csv` what it made. A stopped run is not saved.
 
 ## Dataset → Photos
 
@@ -102,6 +104,13 @@ counter at the top shows it. Any saved subset can be chosen wherever a step runs
 (system 2, the photo-based 3D datasets). Tick *Make it the project's subset*
 when saving to choose which one that is. Nothing is saved until you press *Save subset*; the line above the
 pictures says whether the choice on screen differs from the saved one.
+
+**Create random subsets** (a fold-out) draws subsets by chance: choose the pool (favourites or all Mooneys),
+the size, how many, a name stem (they are named *random 1*, *random 2*, …) and a seed. A photo never appears
+twice in one subset; *One photo per person* and *Subsets do not share photos* are on unless you untick them.
+The same seed and pool give the same subsets, and pool, seed and options are stored with each subset in
+`subsets.json`. If the pool is too small, as many full subsets as fit are made and the message says how many
+are missing. The project's subset is not changed.
 
 ## Dataset → 3D datasets
 
@@ -331,7 +340,7 @@ Notes:
 Below the log the page shows the results of the chosen dataset: the summary table and figure for the photos,
 the table by light direction against the truth for a 3D dataset.
 
-**Save this state as a run** freezes the current state under a name (see *Saved runs* below).
+**Save this state as a run** freezes the current state under a name (see *Runs* below).
 
 **Settings of the systems** (a fold-out):
 
@@ -346,65 +355,102 @@ the table by light direction against the truth for a 3D dataset.
   system 2 is asked for the name.
 - System 5, the 3D face mesh (MediaPipe), is an optional later step; tick it in the list of systems.
 
-## Experiments → One-button run
+## Experiments → Runs
 
-The whole workflow with one button: Mooneys, vision systems, 3D faces, figures, and a saved copy.
+A run takes one source through the stages you switch on and is saved under its name. Runs belong to groups;
+a group works through its runs one after another, for example overnight. The page has three parts.
 
-1. Give the run a name and, if you like, a note.
-2. Tick the steps and set their values:
-   - **Make the Mooneys**: blur, white share, background and phase-1 gray. The values become the project's
-     defaults. Mooneys you adjusted by hand are kept. Untick it to use the Mooneys as they are.
-   - **Vision systems**: any of the four. System 2 is skipped if Ollama is not running.
-   - **3D faces**: any of the three sources, with the default lights; each is rendered, turned into Mooneys
-     and run through systems 1, 3 and 4.
-   - **Which photos:** system 2 and the photo-based 3D sources each take a set: all photos, your favourites
-     or any saved subset. Systems 1, 3 and 4 always run on every photo, so their tables stay complete.
-   - **Export figures** and **Save the run**, with a choice of what the saved copy holds.
-3. Press **Run**, or **Add to queue**. The log names each step as it starts; a step that cannot run says why
-   and the rest goes on.
+### 1 New run
 
-Below the log the page shows the summary table and figure of the current state and the photos and the 3D sets
-side by side. *Only save the current state as a run* saves without running anything. Every step calls the same
-code as its own page, so the two ways give the same results.
+Give the run a name, a group (pick one or type a new name) and, if you like, a note. The run is drawn as a row
+of stage cards. Click a card to see its settings below the row; the switch on a card turns that stage on or
+off.
 
-## Experiments → Queue
+| Stage | What it does |
+|---|---|
+| Source | The photos, or one of the 3D datasets made in Dataset → 3D datasets (offered once it has renders), or a saved 3D dataset, which is first loaded as the live one. For photos: the set system 2 runs on. |
+| Mooneys | Off: the Mooneys are used as they are. On: they are made again with the blur, white share, background and phase-1 gray set here; the values become the project's defaults. For photos, Mooneys adjusted by hand are kept. |
+| Vision systems | Photos: any of systems 1 to 4 (system 2 is skipped if Ollama is not running). 3D: systems 1, 3 and 4, followed by the scores against the true depth. |
+| Export | Summary table and figure to `figures/`, and the comparison of the stimulus sets. |
+| Save | A frozen copy in `runs/<date>_<name>/`, with a choice of what it includes. |
 
-Runs that go one after another without you, for example overnight.
+- **Add to group** puts the run on the board. It keeps the values of the form as they are at that moment; it
+  needs a name and the stage *Save* on.
+- **Run now** adds the run and starts it at once.
+- **Duplicate last run** fills the form from the run added last.
 
-1. Set a run up in *One-button run* and press *Add to queue*. The queue keeps the values of the form as they
-   are at that moment. A queued run needs a name and *Save the run* ticked.
-2. Open *Queue* and press *Start queue*. The table shows each run's state (waiting, running, done, failed,
-   stopped), when it started, how long it took and its last message; the log of the run that is working is
-   shown below and refreshes itself.
+Every stage calls the same code as its own page, so both ways give the same results.
 
+### 2 Groups and queue
+
+One card per group, one row per run: a status dot (waiting, running, done, failed, stopped), the name and its
+Mooney values, the source, and the stages as chips that fill in as the run proceeds; the running stage shows
+where it is, for example *3 Depth · 131 / 246*. The log of the run that is working is shown under its row
+and follows it.
+
+- **Run group** on a group runs its waiting runs in order. **Run all groups** runs everything that waits.
+- On a waiting run: *run* (only this one), ↑ ↓ (move within its group), *edit* (the form takes its values;
+  *Add to group* then changes that run in place), *copy*, *remove*.
+- On a finished run: *results* (opens its saved copy in the history), *log*, *copy*, *again* (sets it back to
+  waiting), *remove*.
 - A run that fails is marked *failed* with its error, and the next one starts.
-- *Stop after the current run* lets the run that is working finish. *Stop now* ends it at the image it is
-  working on: it is marked *stopped*, it is not saved, and the runs after it stay waiting.
-- *Move up*, *Move down* and *Remove* work on waiting items. *Clear finished* takes finished items off the
-  list; their saved runs are untouched.
-- The queue is kept in `queue.json` in the project, so it is still there after a restart. The app must stay
-  open and the computer awake while the queue runs.
+- **Stop after the current run** lets the run that is working finish. **Stop now** (or *Stop* on the group)
+  ends it at the image it is working on: it is marked *stopped*, it is not saved, and the runs after it stay
+  waiting.
+- **Clear finished** takes finished, failed and stopped runs off the board; their saved copies stay.
 
-Every run is frozen in its own saved copy. The project itself is one folder, so after the queue it holds the
-Mooneys and results of the **last** run; put the run you want to go on working with last.
+The board is kept in `queue.json` in the project, so it is still there after a restart. The app must stay open
+and the computer awake while runs work. Every run is frozen in its own saved copy; the project itself is one
+folder, so after a group has run it holds the Mooneys and results of the **last** run. Put the run you want to
+go on working with last.
 
-## Experiments → Saved runs
+### 3 History
 
-A run is a frozen copy of the project's state under a name, in `runs/<date>_<name>/`. It can be saved from
-*Vision systems*, from *One-button run*, and by the queue.
+Every saved run, grouped by its group, newest first, with a few key numbers (photos: face found in the Mooney
+and after re-blurring, the depth correlations of systems 3 and 4; 3D: depth against the truth for the render
+and for the Mooney).
+
+- *open* shows what the run was made with and its summary table and figure, read from the run's folder.
+- *compare* on two or more runs puts them side by side below, and offers them in Analysis → Compare runs.
+- *delete* asks once and then moves the run to `runs/_trash/`; nothing is erased.
+- *publish* writes the run's numbers to `data/<name>/` next to the code, so they can be committed to the
+  repository: `scores.json`, the settings and the per-photo tables of the systems. No photo, Mooney, depth map,
+  render or panel is copied, and nothing of the Basel Face Model. *Publish the current project state* (in the
+  fold-out below the history) does the same for the project as it is now. The app never commits or pushes.
+
+### What a saved run holds
+
+A run is a frozen copy of the project's state under a name, in `runs/<date>_<name>/`. It can also be saved
+from *Vision systems* without running anything.
 
 - The Mooneys, `params.csv`, `settings.json`, `favorites.json`, `subsets.json` and `dataset.csv` are always
   saved. You choose the rest: vision system results and tables, exported figures, the subsets, the three 3D
   folders, and the original photos (off by default).
-- `run.json` records the values the Mooneys were made with, the counts, the date, what was included, the note
-  and the list of photos. Saving twice under one name keeps both.
+- `run.json` records the values the Mooneys were made with, the counts, the date, the group, what the run
+  did, what was included, the note and the list of photos. Saving twice under one name keeps both.
+- `scores.json` holds the scores of the run in a fixed format (below).
 - A run without the result tables cannot be used in *Compare runs*.
 
-The page lists every saved run, newest first. Choosing one shows what it was made with and its summary table
-and figure, read from the run's folder; nothing in the run is changed.
+### The scores of a run: `scores.json`
 
-**Working with runs.** Save the run, change the settings in Mooney → Batch, generate again, run the systems
-again, save under another name; or queue the variants. Then compare them in Analysis → Compare runs.
+Written into every saved run, read from the result tables the run already holds; nothing is computed again.
+Runs saved before this file existed get it the first time the Runs page is opened, or with
+`python analysis.py --scores <runs folder>`; no other file of such a run is changed. Next to the runs,
+`scores_index.json` and `scores_index.csv` list the key numbers of all runs, one row per run.
+
+| Field | Holds |
+|---|---|
+| `schema` | `mooney-studio.scores/1` |
+| `run` | `name`, `group`, `folder`, `saved`, `note`, `source` (`photos` or a 3D folder) |
+| `settings` | what the Mooneys were made with: blur, white target and white reached, background, phase-1 gray, counts |
+| `photos` | `n`, `mooneys`, `adjusted_by_hand` |
+| `systems.1_face_model` | `n`; `face_detected`: counts for `original`, `mooney`, `mooney_reblurred` with `original_n`, `mooney_n`; `similarity_to_own_original`: `mooney` and `mooney_reblurred`, each `mean`, `median`, `min`, `max`, `n` |
+| `systems.2_vision_language_model` | `n_original`, `n_mooney`, `model`; `face_present_yes`: counts for `original` and `mooney` |
+| `systems.3_learned_depth`, `systems.4_depth_from_shading` | `n`; `mooney_vs_original` and `mooney_vs_original_centre`, each `mean`, `median`, `min`, `max`, `n` |
+| `sets_3d.<folder>` | for each 3D folder in the run: `renders`, `mooneys`; `face_detected` for `render`, `mooney`, `mooney_reblurred` as `yes` and `n`; `similarity_mooney_to_render`; `depth_vs_truth` for systems 3 and 4, each `render` and `mooney`; `by_light`: the same per light direction |
+
+A block is left out when the run has no table for it. Numbers are numbers, rounded to four decimals; `null`
+where a value does not exist.
 
 ## Analysis → Results
 
@@ -529,14 +575,15 @@ project/
   favorites.json       favourites
   identities.txt       the names last entered in Dataset → Photos
   subsets.json         the named subsets
-  queue.json           the run queue
+  queue.json           the board of runs (Experiments → Runs)
   rejected.csv         photos removed by hand
   _removed/            the removed photos themselves
   3D/                  3D faces reconstructed from photos: same layout again, plus truth/
   3D_basel_fit/        the Basel Face Model fitted to your photos: same layout as 3D/
   3D_basel/            invented 3D faces from the Basel Face Model: same layout as 3D/
   3D_sets/<name>/      saved 3D datasets: set.json and a copy of one of the three folders above in data/
-runs/                  saved runs: <date>_<name>/ with Mooneys, results and run.json
+runs/                  saved runs: <date>_<name>/ with Mooneys, results, run.json and scores.json;
+                       scores_index.json and scores_index.csv list all runs; _trash/ holds deleted runs
 ```
 
 Model files are the only data kept next to the code, in `models/`. They are downloaded the first time a step

@@ -24,6 +24,7 @@ import argparse
 import csv
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -64,7 +65,9 @@ import bfm_fit
 import collect_faces as cf
 import config as cfg
 import face3d as f3
+import publish as pub
 import results as rs
+import runboard as rb
 import runqueue as rq
 import vision as vs
 from mooney import make_mooney, subject_mask, resize_max, face_brightness
@@ -75,6 +78,7 @@ PROJECT_ROOT = cfg.PROJECT_DIR                     # <working folder>/project un
 RUNS_ROOT = cfg.RUNS_DIR                           # <working folder>/runs unless set otherwise
 NOTES_ROOT = cfg.NOTES_DIR                         # <working folder>/notes: the user's own notes, never part of the code
 DOCS_ROOT = os.path.join(HERE, "docs")
+DATA_ROOT = os.path.join(HERE, "data")            # published results: tables only, next to the code so they can be committed
 NAMES_FILE = os.path.join(PROJECT_ROOT, "identities.txt")   # the list of names last used in Dataset
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 TARGET_PHOTOS, TARGET_SUBSET = cfg.TARGET_PHOTOS, cfg.TARGET_SUBSET
@@ -178,7 +182,7 @@ def overview_md():
                "Or copy your own square face photos into the `Original/` folder shown below and reload the page.\n"
                "2. Make the Mooneys in **Mooney → Batch**.\n"
                "3. Run the vision systems in **Experiments → Vision systems** and read the outcome in **Analysis → Results**.\n\n"
-               "**Experiments → One-button run** does steps 2 and 3 in one go.")
+               "**Experiments → Runs** does steps 2 and 3 in one go, and keeps the outcome under a name.")
     elif s["mooneys"] < n:
         nxt = f"Make the Mooneys in **Mooney → Batch** ({n - s['mooneys']} of {n} photos have none yet)."
     elif any(r[k] < tgt[k] for k in tgt):
@@ -190,7 +194,7 @@ def overview_md():
     elif not s["figures"]:
         nxt = "Press *Export figures* in **Analysis → Results**."
     else:
-        nxt = ("Every step is done. Save the run in **Experiments** to keep it, or go on with a 3D dataset in "
+        nxt = ("Every step is done. Save the state as a run in **Experiments → Runs** to keep it, or go on with a 3D dataset in "
                "**Dataset → 3D datasets**.")
     if 0 < n < TARGET_PHOTOS:
         nxt += f"  \nThe dataset has {n} of the {TARGET_PHOTOS} photos set as target; collect more in **Dataset → Photos** if you want the full set."
@@ -231,7 +235,7 @@ def folders_md():
     notes = len(note_files())
     rows = [("Working folder", WORK_ROOT, "everything of yours: project, saved runs, notes"),
             ("Project", PROJECT_ROOT, "photos, Mooneys, results, settings"),
-            ("Saved runs", RUNS_ROOT, "frozen copies made in Experiments"),
+            ("Saved runs", RUNS_ROOT, "frozen copies made in Experiments; listed in Experiments → Runs"),
             ("Notes", NOTES_ROOT, f"{notes} Markdown file{'s' if notes != 1 else ''}, shown in Docs → Notes" if notes
              else "optional: Markdown files put here appear in Docs → Notes after a restart"),
             ("Model files", os.path.join(HERE, "models"), "downloaded on first use, next to the code")]
@@ -439,7 +443,7 @@ Stopped = rq.StopNow                                 # raised inside a job at it
 
 def busy_now():
     """Name of the long job that is working (a run, Batch, the queue …), or None."""
-    return _busy["what"] or ("the queue" if rq.is_running() else None)
+    return _busy["what"] or ("a run (Experiments → Runs)" if rq.is_running() else None)
 
 
 def claim(what):
@@ -483,7 +487,7 @@ def was_stopped():
 def stop_job():
     """The Stop button next to a long job. The job ends after the image or step it is working on."""
     if rq.is_running():
-        gr.Info("The queue is running. Stop it in Experiments → Queue.")
+        gr.Info("A run is working. Stop it in Experiments → Runs.")
     elif _busy["what"]:
         _stop["on"] = True
         gr.Info(f"Stopping {_busy['what']}: it ends after the image it is working on.")
@@ -704,6 +708,83 @@ def subset_save(name, size, show, chosen, make_active):
     if n < int(size or TARGET_SUBSET):
         msg += f" The size is {int(size)}; {int(size) - n} more can be added."
     return subset_view(name, size, show, chosen, msg) + (gr.update(choices=subset_names(), value=name), status_html())
+
+
+def person_of(stem, who=None):
+    """The person a photo shows: the identity in dataset.csv, else the file name without its _n ending."""
+    return ((who or {}).get(stem) or stem.rsplit("_", 1)[0]).strip().lower()
+
+
+def draw_subsets(pool, size, count, seed, one_per_person=True, disjoint=True, who=None):
+    """
+    Draw `count` random subsets of `size` photos from `pool` (stems). Never a photo twice in one subset.
+    one_per_person: no person twice inside a subset; disjoint: the subsets share no photo.
+    The same pool and seed give the same subsets. Only full subsets are returned, so the list can be shorter than count.
+    """
+    rnd = random.Random(int(seed))
+    pool, used, out = sorted(set(pool)), set(), []
+    for _ in range(int(count)):
+        cand = [s for s in pool if not (disjoint and s in used)]
+        rnd.shuffle(cand)
+        pick, people = [], set()
+        for s in cand:
+            if len(pick) >= int(size):
+                break
+            p = person_of(s, who)
+            if one_per_person and p in people:
+                continue
+            pick.append(s); people.add(p)
+        if len(pick) < int(size):
+            break
+        out.append(pick); used.update(pick)
+    return out
+
+
+def subset_random(pool_label, size, count, stem, seed, one_per_person, disjoint, show):
+    """Create random subsets and save each like Save subset does. The project's subset is not changed."""
+    size, count, seed = int(size or TARGET_SUBSET), int(count or 1), int(seed or 0)
+    stem = str(stem or "").strip() or "random"
+    pool = subset_candidates(pool_label)
+    keep = (gr.update(), gr.update())
+
+    def refuse(msg):
+        return keep + (gr.update(),) * 4 + (msg, gr.update()) + (gr.update(), status_html())
+    if not subset_slug(stem):
+        return refuse("Give the random subsets a name stem with letters or digits.")
+    if size < 1 or count < 1:
+        return refuse("Size and number of subsets must be at least 1.")
+    if not pool:
+        return refuse(f"Nothing to draw from: “{pool_label}” holds no Mooneys.")
+    who = {os.path.splitext(r.get("file", ""))[0]: r.get("identity", "") for r in read_csv("dataset.csv")}
+    drawn = draw_subsets(pool, size, count, seed, bool(one_per_person), bool(disjoint), who)
+    if not drawn:
+        people = len({person_of(s, who) for s in pool})
+        return refuse(f"No subset of {size} could be drawn: the pool has {len(pool)} photos of {people} people"
+                      + (" and only one photo per person is allowed." if one_per_person else "."))
+    init_project()
+    d = load_subsets()
+    taken = set(d["sets"]) | {subset_slug(n) for n in d["sets"]}
+    names, k = [], 1
+    for pick in drawn:
+        while f"{stem} {k}" in taken or subset_slug(f"{stem} {k}") in taken:
+            k += 1
+        name = f"{stem} {k}"
+        taken.add(name)
+        d["sets"][name] = {"size": size, "stems": list(pick),
+                           "random": {"pool": pool_label, "pool_size": len(pool), "seed": seed, "one_per_person": bool(one_per_person),
+                                      "disjoint": bool(disjoint), "drawn_together": len(drawn)}}
+        write_pairs(os.path.join("Subsets", subset_slug(name)), pick)
+        names.append(name)
+    json.dump(d, open(P("subsets.json"), "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    short = count - len(drawn)
+    msg = (f"Created {len(names)} random subset{'s' if len(names) != 1 else ''} of {size}: {', '.join('“' + n + '”' for n in names)} "
+           f"· pool {pool_label} ({len(pool)} photos) · seed {seed}"
+           + (" · one photo per person" if one_per_person else "") + (" · no photo shared between them" if disjoint and len(names) > 1 else "") + ".")
+    if short:
+        msg += f" {short} more could not be made: the pool is too small for that with these rules."
+    msg += " The project's subset was not changed."
+    return (names[0], gr.update(value=size)) + subset_view(names[0], size, show, list(drawn[0]), msg) + (
+        gr.update(choices=subset_names(), value=names[0]), status_html())
 
 
 def subset_delete(name, show):
@@ -1132,42 +1213,20 @@ def d3_compare_export():
     return f"Wrote {len(made)} files to figures/: " + ", ".join(made) if made else "Nothing to export yet."
 
 
-# ============================================================================ Run (the whole pipeline with one button)
+# ============================================================================ Runs: one run = one source and its stages
 PIPE_SYSTEMS = ["1 Face model", "2 Vision-language model (chosen set only, needs Ollama)", "3 Learned depth", "4 Depth from shading"]
-RUNS_COLS = ["Name", "Saved", "Mooneys", "By hand", "Blur", "White", "Background", "Systems", "Also holds", "Note"]
-RUNS_WIDTHS = ["14%", "12%", "9%", "7%", "6%", "7%", "10%", "8%", "14%", "13%"]
-RUNS_SHORT = {"figures": "figures", "Subset": "subset", "3D": "3D from photos", "3D_basel_fit": "3D Basel fitted", "3D_basel": "3D Basel",
-              "Original": "photos"}
-
-
-def runs_table():
-    """One row per saved run, newest first, read from each run's run.json."""
-    rows = []
-    for d in reversed(an.list_runs(RUNS_ROOT)):
-        try:
-            j = json.load(open(os.path.join(RUNS_ROOT, d, "run.json"), encoding="utf-8"))
-        except Exception:                                   # a run saved by hand, or a damaged file
-            j = {}
-        u, c = j.get("used", {}), j.get("counts", {})
-        systems = ", ".join(p[-1] for p in ("Result1", "Result2", "Result3", "Result4") if c.get(p)) or "–"
-        extra = ", ".join(short for part, short in RUNS_SHORT.items() if os.path.isdir(os.path.join(RUNS_ROOT, d, part))
-                          and any(not f.startswith(".") for _r, _d, fs in os.walk(os.path.join(RUNS_ROOT, d, part)) for f in fs))
-        rows.append([j.get("name", d), j.get("saved", ""), u.get("Mooneys", c.get("Mooney", "")), u.get("Adjusted by hand", ""),
-                     u.get("Blur σ (px)", ""), u.get("White target", ""), u.get("Background", ""), systems, extra or "–",
-                     j.get("note", "")])
-    return rows or None
-
-
-def pipeline_view(msg=""):
-    """What the one-button run shows below its log: message, summary table, figure, comparison of the stimulus sets."""
-    rows = rs.summary(PROJECT_ROOT)
-    table = [[r.get(c, "") for c in SUMMARY_COLS] for r in rows] or None
-    head, crows = a3.compare_sets(PROJECT_ROOT)
-    return (msg, table, rs.figure(PROJECT_ROOT) if rows else None, gr.update(value=crows or None, headers=head))
-
-
 PIPE_KEYS = ["name", "note", "keep", "do_batch", "sigma", "white", "bg_mode", "bg_level", "systems", "d3", "n_faces", "do_export",
              "do_save", "vlm_set", "d3_set", "d3_fit_set"]
+R_PHOTOS = "photos"
+R_SOURCES = {R_PHOTOS: "Photos", f3.SUB: "3D · reconstructed", bfm_fit.SUB: "3D · Basel fitted", bfm.SUB: "3D · Basel invented"}
+R_SOURCE_KEY = {v: k for k, v in R_SOURCES.items()}
+R_SYS = {1: "1 Face model", 2: "2 Vision-language model (needs Ollama)", 3: "3 Learned depth", 4: "4 Depth from shading"}
+R_SYS_KEY = {v: k for k, v in R_SYS.items()}
+R_SYS_SHORT = {1: "1 Face", 2: "2 VLM", 3: "3 Depth", 4: "4 Shading"}
+R_ON = {"mooneys": False, "systems": True, "export": True, "save": True}       # which stages a new run starts with
+R_NO_SET = "–"
+QUEUE_NOTE = ("Every run is frozen in its own saved copy. The project itself is one folder, so after a group has run it holds "
+              "the Mooneys and results of the **last** run; put the run you want to keep working on last.")
 
 
 def pipeline_config(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
@@ -1252,172 +1311,638 @@ def pipeline_steps(c, saved):
     return steps
 
 
-def pipeline_job(c, saved, progress=None):
-    """One run as a job(log): used by the Run button (with a progress bar) and by the queue (without)."""
-    steps = pipeline_steps(c, saved)
-    total = sum(w for _, w, _ in steps)
-    progress = progress or (lambda *a, **k: None)
-
-    def job(log):
-        t0, done = time.time(), 0
-        log(f"Run{' “' + c['name'] + '”' if c['name'] else ''}: {len(steps)} steps.")
-        for k, (title, w, fn) in enumerate(steps):
-            log(""); log(f"── Step {k + 1} of {len(steps)}: {title}")
-            fn(log, stoppable(lambda p, done=done, w=w, title=title: progress((done + w * min(max(float(p), 0), 1)) / total, desc=title)))
-            done += w
-        log(""); log(f"Finished in {(time.time() - t0) / 60:.1f} min.")
-    return job
+def r_sources():
+    """Sources a run can take: the photos, and every live 3D dataset that has renders."""
+    return [R_SOURCES[R_PHOTOS]] + [R_SOURCES[s] for s in (f3.SUB, bfm_fit.SUB, bfm.SUB) if d3_gallery("Original", s)]
 
 
-def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
-             vlm_set=None, d3_set=SET_SUGGEST, d3_fit_set=None, progress=gr.Progress()):
-    """
-    One full run: Mooneys, vision systems, 3D faces, figures, saved copy - each part only if it is ticked.
-    Nothing here computes anything itself; every step calls the same function as its own page.
-    """
+def r_groups():
+    seen = rq.groups(PROJECT_ROOT)
+    for j in r_saved_runs():
+        if j["group"] not in seen and j["group"] != R_NO_GROUP:
+            seen.append(j["group"])
+    return seen or [rq.DEFAULT_GROUP]
+
+
+def run_config(name, group, note, source, saved_set, vlm_set, sigma, white, bg_mode, bg_level, systems, keep, on):
+    """The form of a new run as a plain dict (it is stored in the queue file and, in short, with the saved run)."""
+    on = {**R_ON, **(on or {})}
+    src = R_SOURCE_KEY.get(source, R_PHOTOS)
+    saved_set = None if saved_set in (None, "", R_NO_SET) else saved_set
+    if saved_set:                                           # a saved 3D dataset decides the source
+        j = next((x for x in d3_set_list() if x["folder"] == saved_set), None)
+        src = j.get("sub", src) if j else src
+    nums = sorted(R_SYS_KEY[s] for s in (systems or []) if s in R_SYS_KEY)
+    if src != R_PHOTOS:
+        nums = [n for n in nums if n != 2]
+    return {"v": 2, "name": str(name or "").strip(), "group": str(group or "").strip() or rq.DEFAULT_GROUP, "note": str(note or "").strip(),
+            "source": src, "saved_set": saved_set if src != R_PHOTOS else None, "vlm_set": vlm_set,
+            "mooneys": bool(on["mooneys"]), "sigma": float(sigma), "white": float(white), "bg_mode": bg_mode, "bg_level": int(bg_level),
+            "systems": nums if on["systems"] else [], "export": bool(on["export"]), "save": bool(on["save"]), "keep": list(keep or [])}
+
+
+def run_is_old(c):
+    return c.get("v") != 2
+
+
+def run_refusal(c):
+    """Why a run cannot start, or None."""
+    if run_is_old(c):
+        return pipeline_refusal({**{k: None for k in PIPE_KEYS}, **c})
+    if c["save"] and not an.run_slug(c["name"]):
+        return "Not started: give the run a name first, or switch the stage *Save* off."
+    if not (c["mooneys"] or c["systems"] or c["export"] or c["save"]):
+        return "Not started: every stage is switched off."
+    if c["source"] == R_PHOTOS:
+        if not images_in("Original"):
+            return "Not started: there are no photos yet. Collect some in **Dataset → Photos** first."
+        if not c["mooneys"] and not images_in("Mooney"):
+            return "Not started: there are no Mooneys yet. Switch the stage *Mooneys* on."
+        return None
+    sub = c["source"]
+    if c.get("saved_set"):
+        if not os.path.isdir(P(D3_SETS, c["saved_set"], "data")):
+            return f"Not started: the saved 3D dataset “{c['saved_set']}” is not there any more."
+        return None
+    if not d3_gallery("Original", sub):
+        return f"Not started: `{sub}/` holds no renders. Make the 3D dataset in **Dataset → 3D datasets** first."
+    if c["systems"] and not c["mooneys"] and not d3_gallery("Mooney", sub):
+        return f"Not started: the renders in `{sub}/` have no Mooneys yet. Switch the stage *Mooneys* on."
+    return None
+
+
+def run_stage_titles(c):
+    """The chips of a run, in the order its steps run."""
+    if run_is_old(c):
+        return [t for t, _w, _f in pipeline_steps({**{k: None for k in PIPE_KEYS}, **c}, {})]
+    out = (["Load 3D dataset"] if c.get("saved_set") else []) + (["Mooneys"] if c["mooneys"] else [])
+    if c["source"] == R_PHOTOS:
+        out += [R_SYS_SHORT[n] for n in (1, 3, 4, 2) if n in c["systems"]]
+    elif c["systems"]:
+        out += ["Systems " + ", ".join(str(n) for n in c["systems"]) + " and the truth"]
+    return out + (["Export"] if c["export"] else []) + (["Save"] if c["save"] else [])
+
+
+def run_settings_line(c):
+    """A few words on what a run does to the Mooneys, for the board."""
+    if run_is_old(c):
+        return "set up in an earlier version"
+    if c["mooneys"]:
+        return f"blur {c['sigma']:g} · {c['white']:g} % · {c['bg_mode']}"
+    return "Mooneys as they are"
+
+
+def run_source_line(c):
+    if run_is_old(c):
+        return "photos and 3D in one run"
+    if c["source"] == R_PHOTOS:
+        return f"Photos · {len(images_in('Original'))}"
+    if c.get("saved_set"):
+        return f"{R_SOURCES.get(c['source'], c['source'])} · saved “{c['saved_set']}”"
+    return f"{R_SOURCES.get(c['source'], c['source'])} · {len(d3_gallery('Original', c['source']))}"
+
+
+def d3_set_put_live(folder, log=print):
+    """Copy a saved 3D dataset over the live folder of its source. Returns the sub-folder, or None if it cannot be read."""
+    j = next((x for x in d3_set_list() if x["folder"] == folder), None)
+    src = P(D3_SETS, folder, "data")
+    if not j or j.get("sub") not in D3_SOURCES.values() or not os.path.isdir(src):
+        log(f"The saved 3D dataset “{folder}” cannot be read."); return None
+    sub = j["sub"]
+    log(f"Loading “{j.get('name', folder)}” as {sub}/. It replaces: {d3_line(sub)}. The saved copy stays as it is.")
+    shutil.rmtree(P(sub), ignore_errors=True)
+    shutil.copytree(src, P(sub))
+    return sub
+
+
+def run_steps(c, saved):
+    """The steps of one run as (title, weight, fn(log, prog)). Every step calls the same function as its own page."""
+    if run_is_old(c):
+        return pipeline_steps({**{k: None for k in PIPE_KEYS}, **c}, saved)
+    titles, steps = run_stage_titles(c), []
+    sigma, white, bg_mode, bg_level, sub = c["sigma"], c["white"], c["bg_mode"], c["bg_level"], c["source"]
+    photos = sub == R_PHOTOS
+
+    def values(log, kept):
+        st = save_settings(sigma=float(sigma), white=float(white), bg_mode=bg_mode, bg_level=int(bg_level))
+        log(f"Values: blur {st['sigma']:g} · white {st['white']:g} % · background {st['bg_mode']} · phase-1 gray {st['bg_level']}. "
+            "Saved as the project's defaults." + kept)
+        return st
+
+    if c.get("saved_set"):
+        def step_load(log, prog):
+            if d3_set_put_live(c["saved_set"], log) is None:
+                raise RuntimeError("the saved 3D dataset could not be loaded")
+        steps.append((1, step_load))
+    if c["mooneys"] and photos:
+        def step_batch(log, prog):
+            st = values(log, " Mooneys adjusted by hand are kept.")
+            bt.run_batch(PROJECT_ROOT, source="Original", sigmas=(float(sigma),), whites=(float(white) / 100,), bg_level=int(bg_level),
+                         separate=bool(st["separate"]), bg_mooney=bg_mode, stats_on="face", white_rule=st["white_rule"],
+                         bright_white=float(st["bright_white"]) / 100, bright_border=float(st["bright_border"]),
+                         preprocess=st["preprocess"], keep_manual=True, log=log, progress=prog)
+        steps.append((3, step_batch))
+    elif c["mooneys"]:
+        def step_batch3d(log, prog):
+            values(log, "")
+            d3_job(["Mooneys"], sub, [], [], {}, lambda v, desc=None: prog(v))(log)
+        steps.append((3, step_batch3d))
+    if photos:
+        for n, fn in ((1, vs.run_face), (3, vs.run_depth), (4, vs.run_shading)):
+            if n in c["systems"]:
+                steps.append((3, lambda log, prog, fn=fn: fn(PROJECT_ROOT, "Original", log=log, progress=prog)))
+        if 2 in c["systems"]:
+            def step_vlm(log, prog):
+                vlm_set = c.get("vlm_set") or vlm_scope_label()
+                model, only = pick_model(vs.status()["vlm_models"]), photo_set_stems(vlm_set)
+                if not model:
+                    log("Skipped: Ollama is not running or has no vision model (see Experiments → Vision systems → settings)."); return SKIPPED
+                if only is not None and not only:
+                    log(f"Skipped: the set “{vlm_set}” holds no photos."); return SKIPPED
+                save_settings(vlm_scope="all" if vlm_set == SET_ALL else vlm_set)
+                log(f"On: {vlm_set}" + ("" if only is None else f" ({len(only)} photos)"))
+                vs.run_vlm(PROJECT_ROOT, model, source="Original", log=log, progress=prog, only=None if only is None else set(only))
+            steps.append((3, step_vlm))
+    elif c["systems"]:
+        steps.append((6, lambda log, prog: d3_job(["systems"], sub, [], [], {}, lambda v, desc=None: prog(v), systems=c["systems"])(log)))
+    if c["export"]:
+        def step_export(log, prog):
+            if photos:
+                favs = load_favs()
+                made = rs.export(PROJECT_ROOT, favs or rs.stems(PROJECT_ROOT)[:10])
+                log(f"figures/: {len(made)} files (summary table, figure, one panel each for "
+                    + ("your favourites" if favs else "the first 10 photos") + ").")
+            elif d3_gallery("Mooney", sub):
+                log(f"{sub}/figures/: {len(a3.export(PROJECT_ROOT, sub))} files.")
+            made = a3.export_compare(PROJECT_ROOT)
+            if made:
+                log(f"figures/: comparison of the stimulus sets, {len(made)} files.")
+        steps.append((1, step_export))
+    if c["save"]:
+        def step_save(log, prog):
+            facts = {k: c[k] for k in ("source", "saved_set", "mooneys", "systems", "export", "vlm_set")}
+            facts["source_name"] = R_SOURCES.get(sub, sub)
+            saved["folder"], saved["msg"] = an.save_run(PROJECT_ROOT, RUNS_ROOT, c["name"], include=[RUN_LABELS[x] for x in c["keep"] if x in RUN_LABELS],
+                                                        note=c["note"], group=c["group"], run=facts)
+            log(saved["msg"])
+            if not saved["folder"]:
+                raise RuntimeError(saved["msg"])
+        steps.append((1, step_save))
+    return [(t, w, fn) for t, (w, fn) in zip(titles, steps)]
+
+
+SKIPPED = "skipped"
+_PROGRESS_LINE = re.compile(r"^\s*\[?\s*(\d+)\s*/\s*(\d+)\s*\]?(\s|$)")
+
+
+def queue_run_one(c, log, report=None):
+    """What the queue does with one run. Tells the queue where the run is; returns its line and its saved folder."""
     init_project()
-    c = pipeline_config(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
-                        vlm_set, d3_set, d3_fit_set)
-    refuse = pipeline_refusal(c)
+    report = report or (lambda *a, **k: None)
+    refuse = run_refusal(c)
     if refuse:
-        yield (gr.update(), refuse) + (gr.update(),) * 5
-        return
+        raise RuntimeError(refuse.replace("**", "").replace("*", "").replace("`", ""))
     saved = {}
-
-    def final():
-        if was_stopped():
-            msg = "Stopped by you. The run was **not saved**. " + STOP_NOTE
-        else:
-            msg = saved.get("msg") or ("Finished. Not saved as a run (the box was not ticked)." if not c["do_save"]
-                                       else "Finished, but the run was not saved; see the log.")
-        return pipeline_view(msg) + (status_html(), gr.update(choices=run_choices()))
-    yield from run_logged(pipeline_job(c, saved, progress), 6, final, what="a run")
-
-
-def pipeline_save_only(name, keep, note):
-    folder, msg = an.save_run(PROJECT_ROOT, RUNS_ROOT, name, include=[RUN_LABELS[x] for x in (keep or [])], note=note)
-    return msg, gr.update(choices=run_choices())
-
-
-# ============================================================================ Queue (runs one after another, unattended)
-QUEUE_COLS = ["#", "Name", "State", "Added", "Started", "Min", "Message"]
-QUEUE_NOTE = ("Every run in the queue is frozen in its own saved copy. The project itself is one folder, so after the queue it "
-              "holds the Mooneys and results of the **last** run; put the run you want to keep working on last.")
-
-
-def queue_run_one(c, log):
-    """What the queue does with one item: the same run as the Run button. Returns the line shown in the queue table."""
-    init_project()
-    c = {**{k: None for k in PIPE_KEYS}, **c}
-    refuse = pipeline_refusal(c)
-    if refuse:
-        raise RuntimeError(refuse.replace("**", "").replace("*", ""))
-    saved = {}
-
-    def stoppable_log(msg=""):
-        check_stop()
-        log(msg)
+    steps = run_steps(c, saved)
+    stages = [{"title": t, "state": rq.WAITING, "detail": ""} for t, _w, _f in steps]
+    total, done, t0 = sum(w for _t, w, _f in steps) or 1, 0, time.time()
     try:
-        pipeline_job(c, saved)(stoppable_log)
+        check_stop()
+        log(f"Run “{c.get('name') or 'unnamed'}” · {run_source_line(c)} · {len(steps)} stage{'s' if len(steps) != 1 else ''}.")
+        for k, (title, w, fn) in enumerate(steps):
+            cur = stages[k]
+            cur["state"], seen = rq.RUNNING, {"count": False}
+            report(stages, done / total)
+
+            def slog(msg="", cur=cur, seen=seen):
+                check_stop()
+                m = _PROGRESS_LINE.match(str(msg))
+                if m and int(m.group(2)) > 0:
+                    cur["detail"], seen["count"] = f"{m.group(1)} / {m.group(2)}", True
+                log(msg)
+
+            def prog(p, *a, cur=cur, seen=seen, done=done, w=w, **kw):
+                check_stop()
+                p = min(max(float(p), 0.0), 1.0)
+                if not seen["count"]:
+                    cur["detail"] = f"{p:.0%}"
+                report(stages, (done + w * p) / total)
+            log(""); log(f"── Stage {k + 1} of {len(steps)}: {title}")
+            r = fn(slog, prog)
+            cur["state"], cur["detail"] = (SKIPPED if r == SKIPPED else rq.DONE), ""
+            done += w
+            report(stages, done / total)
+        log(""); log(f"Finished in {(time.time() - t0) / 60:.1f} min.")
+    except BaseException:
+        report(stages, done / total)
+        raise
     finally:
         _stop["on"] = False
-    return saved.get("msg") or "finished, but not saved; see the log"
+    return {"message": saved.get("msg") or ("finished; not saved (the stage Save was off)" if not c.get("save", c.get("do_save"))
+                                            else "finished, but not saved; see the log"), "folder": saved.get("folder") or ""}
 
 
-def queue_items():
-    return rq.load(PROJECT_ROOT)["items"]
+# ---------------------------------------------------------------------------- the board of groups and runs
+def r_board(open_logs=()):
+    items = rq.snapshot(PROJECT_ROOT)
+    facts = {it["id"]: (run_settings_line(it["config"]), run_source_line(it["config"]), run_is_old(it["config"])) for it in items}
+    return rb.board(items, open_logs or (), rq.is_running(), _busy["what"], facts)
 
 
-def queue_view(msg=None):
-    """Table, chooser of an item, log of the item that runs (or ran last), state line."""
-    items = queue_items()
-    rows, choices, k = [], [], 0
-    for it in items:
-        pos = ""
-        if it["state"] == rq.WAITING:
-            k += 1; pos = k
-        rows.append([pos, it["name"], it["state"], it["added"], it["started"], it["minutes"], it["message"]])
-        choices.append((f"{it['name']}  ·  {it['state']}" + (f"  ·  position {pos}" if pos else ""), it["id"]))
-    text, name = rq.current_log(PROJECT_ROOT)
+def r_state_line():
+    items = rq.snapshot(PROJECT_ROOT)
     waiting = sum(1 for it in items if it["state"] == rq.WAITING)
-    if rq.is_running():
-        line = f"**The queue is running**: “{name}” now, {waiting} waiting."
-    elif busy_now():
-        line = f"The queue is not running; {busy_now()} is working. {waiting} waiting."
-    else:
-        line = f"The queue is not running. {waiting} waiting." if items else "The queue is empty. Add runs in **One-button run**."
-    out = (gr.update(value=rows or None, headers=QUEUE_COLS), gr.update(choices=choices),
-           gr.update(value=text, label=f"Log of “{name}”" if name else "Log"), line)
+    cur = next((it for it in items if it["state"] == rq.RUNNING), None)
+    if rq.is_running() and cur:
+        return f"**Running:** “{cur['name']}” in group “{cur['group']}” · {waiting} waiting."
+    if _busy["what"]:
+        return f"{_busy['what'].capitalize()} is working on another page, so no run can start now. {waiting} waiting."
+    return f"Nothing is running. {waiting} run{'s' if waiting != 1 else ''} waiting." if items else "Nothing is running."
+
+
+def r_view(open_logs, msg=None):
+    """Board, state line, its signature (so the timer can skip a refresh when nothing changed)."""
+    html_ = r_board(open_logs)
+    line = r_state_line()
+    out = (html_, line, hash((html_, line)))
     return out + ((msg,) if msg is not None else ())
 
 
-def queue_tick():
-    """What the timer refreshes while the Queue page is shown: table, log and state line (not the chooser)."""
-    table, _choices, log, line = queue_view()
-    return table, log, line
+def r_tick(open_logs, sig, hsig, picked, armed, opened):
+    """The timer: redraw the board and the history only when something changed."""
+    html_, line, new = r_view(open_logs)
+    hist = r_history(picked, armed, opened)
+    hnew = hash(hist)
+    return (gr.update() if new == sig else html_, gr.update() if new == sig else line, new,
+            gr.update() if hnew == hsig else hist, hnew, gr.update() if hnew == hsig else status_html())
 
 
-def queue_add(*form):
-    c = pipeline_config(*form)
-    if not an.run_slug(c["name"]):
-        return "Not added: give the run a name first. The queue saves each run under its name."
-    if not c["do_save"]:
-        return "Not added: tick *Save the run*. A queued run that is not saved would be overwritten by the next one."
-    refuse = pipeline_refusal(c)
-    if refuse:
-        return refuse.replace("Not started", "Not added")
-    rq.add(PROJECT_ROOT, c["name"], c)
-    n = sum(1 for it in queue_items() if it["state"] == rq.WAITING)
-    return (f"Added “{c['name']}” to the queue (position {n}). It keeps the values of this form as they are now. "
-            "Start the queue in **Queue**.")
-
-
-def queue_start():
+def r_start(open_logs, group=None, only=None):
     if rq.is_running():
-        return queue_view("The queue is already running.")
+        return r_view(open_logs, "A run is working already. Runs go one after another.")
     if busy_now():
-        return queue_view(busy_text())
-    if not any(it["state"] == rq.WAITING for it in queue_items()):
-        return queue_view("Nothing is waiting. Add runs in **One-button run**.")
+        return r_view(open_logs, busy_text())
+    items = rq.snapshot(PROJECT_ROOT)
+    todo = [it for it in items if it["state"] == rq.WAITING and (group is None or it["group"] == group) and (only is None or it["id"] == only)]
+    if not todo:
+        return r_view(open_logs, "Nothing is waiting. Build a run above and press *Add to group*.")
     _stop["on"] = False
-    rq.start(PROJECT_ROOT, queue_run_one)
-    return queue_view("Started. The runs go one after another; this page follows the log. You can close the browser window, "
-                      "but the app (the terminal window) must stay open and the computer awake.")
+    rq.start(PROJECT_ROOT, queue_run_one, group=group, only=only)
+    what = f"“{todo[0]['name']}”" if only else (f"group “{group}” ({len(todo)} run{'s' if len(todo) != 1 else ''})" if group
+                                                else f"all groups ({len(todo)} runs)")
+    return r_view(open_logs, f"Started {what}. You can close the browser window, but the app (the terminal window) must stay "
+                             "open and the computer awake.")
 
 
-def queue_stop():
+def r_stop_after(open_logs):
     if not rq.is_running():
-        return queue_view("The queue is not running.")
+        return r_view(open_logs, "Nothing is running.")
     rq.stop_after_current()
-    return queue_view("The run that is working now will finish; the ones after it stay waiting.")
+    return r_view(open_logs, "The run that is working now will finish; the ones after it stay waiting.")
 
 
-def queue_stop_now():
+def r_stop_now(open_logs):
     if not rq.is_running():
-        return queue_view("The queue is not running.")
+        return r_view(open_logs, "Nothing is running.")
     _stop["on"] = True
-    return queue_view("Stopping now: the run ends after the image it is working on and is marked *stopped*; it is not saved. "
-                      "The runs after it stay waiting. " + STOP_NOTE)
+    return r_view(open_logs, "Stopping now: the run ends after the image it is working on and is marked *stopped*; it is not saved. "
+                             "The runs after it stay waiting. " + STOP_NOTE)
 
 
-def queue_change(item_id, what):
-    if not item_id:
-        return queue_view("Choose an item first.")
-    if what == "remove":
-        ok = rq.remove(PROJECT_ROOT, item_id)
-        msg = "Removed." if ok else "Not removed: an item that is running cannot be removed."
-    else:
-        ok = rq.move(PROJECT_ROOT, item_id, -1 if what == "up" else 1)
-        msg = "Moved." if ok else "Not moved: only waiting items can be moved, within the waiting ones."
-    return queue_view(msg)
-
-
-def queue_clear():
+def r_clear(open_logs):
     rq.clear_finished(PROJECT_ROOT)
-    return queue_view("Finished, failed and stopped items were taken off the list. Their saved runs are untouched.")
+    return r_view(open_logs, "Finished, failed and stopped runs were taken off the board. Their saved copies are in History.")
 
 
-# ============================================================================ Saved runs (reading one run)
+# ---------------------------------------------------------------------------- the form of a new run
+def r_summaries(source, saved_set, vlm_set, sigma, white, bg_mode, bg_level, systems, keep, on):
+    """The one-line summary on each stage card."""
+    on = {**R_ON, **(on or {})}
+    src = R_SOURCE_KEY.get(source, R_PHOTOS)
+    saved_set = None if saved_set in (None, "", R_NO_SET) else saved_set
+    if saved_set:
+        j = next((x for x in d3_set_list() if x["folder"] == saved_set), None)
+        s_source = f"saved 3D dataset<br><b>{rb.esc(j.get('name', saved_set) if j else saved_set)}</b>"
+        src = j.get("sub", src) if j else src
+    elif src == R_PHOTOS:
+        s_source = f"Photos<br>{len(images_in('Original'))} photos, {len(images_in('Mooney'))} Mooneys"
+    else:
+        s_source = f"{rb.esc(R_SOURCES[src])}<br>{len(d3_gallery('Original', src))} renders, {len(d3_gallery('Mooney', src))} Mooneys"
+    nums = [R_SYS_KEY[s] for s in (systems or []) if s in R_SYS_KEY and (src == R_PHOTOS or R_SYS_KEY[s] != 2)]
+    s_sys = rb.chips([R_SYS_SHORT[n] for n in sorted(nums)]) or "no system ticked"
+    if 2 in nums:
+        s_sys += f"<br>system 2 on <b>{rb.esc(vlm_set or vlm_scope_label())}</b>"
+    if src != R_PHOTOS and nums:
+        s_sys += "<br>then the scores against the true depth"
+    kept = [k for k in (keep or [])]
+    return {
+        "source": s_source,
+        "mooneys": (f"make them: blur <b>{float(sigma):g}</b> · white <b>{float(white):g} %</b><br>{rb.esc(bg_mode)} background · gray {int(bg_level)}"
+                    if on["mooneys"] else "keep the Mooneys as they are"),
+        "systems": s_sys if on["systems"] else "no systems in this run",
+        "export": ("summary table, figure" + (", panels" if src == R_PHOTOS else " by light") + "<br>and the comparison of the sets"
+                   if on["export"] else "nothing is exported"),
+        "save": ((f"a frozen copy with {len(kept)} part{'s' if len(kept) != 1 else ''}<br>besides the Mooneys" if kept
+                  else "a frozen copy of the Mooneys and their values") if on["save"] else "the run is not saved"),
+    }
+
+
+def r_cards(sel, source, saved_set, vlm_set, sigma, white, bg_mode, bg_level, systems, keep, on):
+    return rb.cards(sel, {**R_ON, **(on or {})}, r_summaries(source, saved_set, vlm_set, sigma, white, bg_mode, bg_level, systems, keep, on))
+
+
+def r_panels(sel):
+    return tuple(gr.update(visible=sel == k) for k in rb.STAGES)
+
+
+def r_card_click(sel, on, source, saved_set, vlm_set, sigma, white, bg_mode, bg_level, systems, keep, evt: gr.EventData):
+    d = evt._data or {}
+    on = {**R_ON, **(on or {})}
+    stage = d.get("stage") if d.get("stage") in rb.STAGES else sel
+    if d.get("act") == "toggle" and stage != "source":
+        on[stage] = not on[stage]
+    sel = stage
+    return (sel, on, r_cards(sel, source, saved_set, vlm_set, sigma, white, bg_mode, bg_level, systems, keep, on)) + r_panels(sel)
+
+
+def r_source_changed(source, saved_set, systems):
+    """Another source: the systems that fit it, and whether the set for system 2 is asked for."""
+    saved_set = None if saved_set in (None, "", R_NO_SET) else saved_set
+    src = R_SOURCE_KEY.get(source, R_PHOTOS)
+    if saved_set:
+        j = next((x for x in d3_set_list() if x["folder"] == saved_set), None)
+        src = j.get("sub", src) if j else src
+    photos = src == R_PHOTOS
+    choices = [R_SYS[n] for n in ((1, 2, 3, 4) if photos else (1, 3, 4))]
+    value = [s for s in (systems or []) if s in choices] or [R_SYS[n] for n in (1, 3, 4)]
+    return gr.update(choices=choices, value=value), gr.update(visible=photos)
+
+
+R_FORM_N = 20                # how many values r_fill returns: 15 fields and pictures, 5 panels
+
+
+def r_fill(c, sel="source"):
+    """Values for every field of the form from a run's description (for edit, copy and 'duplicate last run')."""
+    on = {"mooneys": bool(c["mooneys"]), "systems": bool(c["systems"]), "export": bool(c["export"]), "save": bool(c["save"])}
+    source = R_SOURCES.get(c["source"], R_SOURCES[R_PHOTOS])
+    photos = c["source"] == R_PHOTOS
+    sys_choices = [R_SYS[n] for n in ((1, 2, 3, 4) if photos else (1, 3, 4))]
+    systems = [R_SYS[n] for n in c["systems"] if R_SYS[n] in sys_choices] or [R_SYS[n] for n in (1, 3, 4)]
+    saved_set = c.get("saved_set") or R_NO_SET
+    vlm_set = c.get("vlm_set") if c.get("vlm_set") in photo_set_choices() else vlm_scope_label()
+    keep = [k for k in c.get("keep", []) if k in RUN_LABELS]
+    return (c["name"], c["group"], c["note"], gr.update(choices=r_sources(), value=source if source in r_sources() else R_SOURCES[R_PHOTOS]),
+            gr.update(choices=[R_NO_SET] + [f for _l, f in d3_set_choices()], value=saved_set),
+            gr.update(choices=photo_set_choices(), value=vlm_set, visible=photos), c["sigma"], c["white"], c["bg_mode"], c["bg_level"],
+            gr.update(choices=sys_choices, value=systems), keep, on, sel,
+            r_cards(sel, source, saved_set, vlm_set, c["sigma"], c["white"], c["bg_mode"], c["bg_level"], systems, keep, on)) + r_panels(sel)
+
+
+def r_add(open_logs, edit_id, *form):
+    """Add to group, or (while a waiting run is being edited) change that run in place."""
+    c = run_config(*form)
+    if not an.run_slug(c["name"]):
+        return r_view(open_logs, "Not added: give the run a name first. Each run is saved under its name.") + (edit_id, r_edit_note(edit_id))
+    if not c["save"]:
+        return r_view(open_logs, "Not added: switch the stage *Save* on. A run in a group that is not saved would be overwritten "
+                                 "by the next one. To run without saving, use *Run now*.") + (edit_id, r_edit_note(edit_id))
+    refuse = run_refusal(c)
+    if refuse:
+        return r_view(open_logs, refuse.replace("Not started", "Not added")) + (edit_id, r_edit_note(edit_id))
+    if edit_id and rq.replace_config(PROJECT_ROOT, edit_id, c["name"], c, c["group"], run_stage_titles(c)):
+        return r_view(open_logs, f"Changed “{c['name']}” in group “{c['group']}”. It keeps its place.") + ("", r_edit_note(""))
+    rq.add(PROJECT_ROOT, c["name"], c, c["group"], run_stage_titles(c))
+    return r_view(open_logs, f"Added “{c['name']}” to group “{c['group']}”. It keeps the values of the form as they are now. "
+                             "Press *Run group* on the group, or *Run all groups*.") + ("", r_edit_note(""))
+
+
+def r_run_now(open_logs, *form):
+    """Add the run and start it at once (only this run)."""
+    c = run_config(*form)
+    if not c["name"]:
+        c["name"] = f"run {time.strftime('%H:%M')}"
+    refuse = run_refusal(c)
+    if refuse:
+        return r_view(open_logs, refuse)
+    if busy_now():
+        return r_view(open_logs, busy_text())
+    item = rq.add(PROJECT_ROOT, c["name"], c, c["group"], run_stage_titles(c))
+    return r_start(open_logs, only=item)[:3] + (f"Started “{c['name']}”. Its stages fill in below as it runs.",)
+
+
+def r_edit_note(edit_id):
+    it = rq.get(PROJECT_ROOT, edit_id) if edit_id else None
+    return (f"Editing “{it['name']}”: *Add to group* now changes that run in place. "
+            "Press *Cancel edit* to add a new run instead.") if it else ""
+
+
+def r_board_click(open_logs, edit_id, evt: gr.EventData):
+    """A click on the board. Returns board, state line, signature, message, open logs, id being edited, edit note,
+    and - for edit and copy - the whole form; everything else leaves the form alone."""
+    d = evt._data or {}
+    what, item_id, group = d.get("act"), d.get("id") or "", d.get("group") or ""
+    open_logs = list(open_logs or [])
+    form = (gr.update(),) * R_FORM_N
+    msg, want = "", ""
+    it = rq.get(PROJECT_ROOT, item_id) if item_id else None
+    if what == "run-group":
+        return r_start(open_logs, group=group) + (open_logs, edit_id, r_edit_note(edit_id), want) + form
+    if what == "run-one" and it:
+        return r_start(open_logs, only=item_id) + (open_logs, edit_id, r_edit_note(edit_id), want) + form
+    if what == "stop-now":
+        return r_stop_now(open_logs) + (open_logs, edit_id, r_edit_note(edit_id), want) + form
+    if what == "results" and it and it.get("folder"):
+        want, msg = it["folder"], "The saved copy of this run is open in the history below."
+    if what in ("up", "down"):
+        msg = "" if rq.move(PROJECT_ROOT, item_id, -1 if what == "up" else 1) else "It is already at the end of the waiting runs of its group."
+    elif what == "remove":
+        msg = "Removed from the board." if rq.remove(PROJECT_ROOT, item_id) else "A run that is working cannot be removed; stop it first."
+        edit_id = "" if edit_id == item_id else edit_id
+    elif what == "again":
+        msg = ("Set back to waiting; it runs again with the same description." if rq.requeue(PROJECT_ROOT, item_id)
+               else "Only a finished, failed or stopped run can be set back.")
+    elif what == "log":
+        open_logs = [x for x in open_logs if x != item_id] if item_id in open_logs else open_logs + [item_id]
+    elif what in ("edit", "dup") and it and not run_is_old(it["config"]):
+        c = dict(it["config"])
+        if what == "dup":
+            c["name"] = f"{c['name']} copy"
+            edit_id, msg = "", f"The form holds a copy of “{it['name']}”. Change what you like and press *Add to group*."
+        else:
+            edit_id, msg = item_id, f"The form holds “{it['name']}”."
+        form = r_fill(c)
+    return r_view(open_logs, msg) + (open_logs, edit_id, r_edit_note(edit_id), want) + form
+
+
+# ---------------------------------------------------------------------------- history of saved runs
+R_NO_GROUP = "no group"
+_kpi_cache = {}
+
+
+def r_show(folder):
+    """Facts, summary table and figure of a saved run for the history; the table and figure are hidden when there is nothing to show."""
+    if not folder:
+        return "", gr.update(value=None, visible=False), gr.update(value=None, visible=False)
+    facts, table, fig = run_show(folder)
+    return facts, gr.update(value=table, visible=bool(table)), gr.update(value=fig, visible=fig is not None)
+
+
+def r_compare(picked):
+    if len(picked or []) < 2:
+        return (gr.update(value=None, visible=False), gr.update(value=None, visible=False),
+                "Tick *compare* on one more run to see them side by side." if picked else "")
+    head, rows, shead, srows = an.compare_runs(PROJECT_ROOT, RUNS_ROOT, picked)
+    return (gr.update(value=rows or None, headers=head, visible=bool(rows)), gr.update(value=srows or None, headers=shead, visible=bool(srows)),
+            "" if rows else "These runs hold no result tables to compare.")
+
+
+def run_kpis(folder):
+    """A few key numbers of a saved run, read from its scores.json (written when the run is saved, or filled in later)."""
+    if folder in _kpi_cache:
+        return _kpi_cache[folder]
+    path, out = os.path.join(RUNS_ROOT, folder), []
+    try:
+        sc = an.read_scores(path) or an.run_scores(path)
+        src, pct = sc["run"].get("source"), lambda k, n: f"{100 * k / n:.0f} %"
+        if src in sc.get("sets_3d", {}):
+            b = sc["sets_3d"][src]
+            dv, fd = b["depth_vs_truth"], b["face_detected"]
+            for label, v in (("depth 3 vs truth, render", dv["3_learned_depth"]["render"]), ("Mooney", dv["3_learned_depth"]["mooney"]),
+                             ("depth 4 vs truth, render", dv["4_depth_from_shading"]["render"]), ("Mooney", dv["4_depth_from_shading"]["mooney"])):
+                if v is not None:
+                    out.append((label, f"{v:.2f}"))
+            if fd.get("mooney_reblurred") and fd["mooney_reblurred"]["n"]:
+                out.append(("face after re-blur", pct(fd["mooney_reblurred"]["yes"], fd["mooney_reblurred"]["n"])))
+        else:
+            s_ = sc.get("systems", {})
+            fd = (s_.get("1_face_model") or {}).get("face_detected")
+            if fd and fd.get("mooney_n"):
+                out += [("face in Mooney", pct(fd["mooney"], fd["mooney_n"])), ("after re-blur", pct(fd["mooney_reblurred"], fd["mooney_n"]))]
+            for key, label in (("3_learned_depth", "depth 3"), ("4_depth_from_shading", "depth 4")):
+                m = ((s_.get(key) or {}).get("mooney_vs_original") or {}).get("mean")
+                if m is not None:
+                    out.append((label, f"{m:.2f}"))
+            v = s_.get("2_vision_language_model")
+            if v and v.get("n_mooney"):
+                out.append(("VLM sees a face", pct(v["face_present_yes"]["mooney"], v["n_mooney"])))
+    except Exception:                                       # a run saved by hand or with other tables: no key numbers
+        out = []
+    _kpi_cache[folder] = out
+    return out
+
+
+def r_saved_runs():
+    """Saved runs, newest first, as the history shows them."""
+    out = []
+    for d in reversed(an.list_runs(RUNS_ROOT)):
+        try:
+            j = json.load(open(os.path.join(RUNS_ROOT, d, "run.json"), encoding="utf-8"))
+        except Exception:
+            j = {}
+        u, run = j.get("used") or {}, j.get("run") or {}
+        settings = " · ".join(x for x in (f"blur {u['Blur σ (px)']}" if u.get("Blur σ (px)") else "", u.get("White target", ""),
+                                          u.get("Background", ""), f"{u['Adjusted by hand']} by hand" if u.get("Adjusted by hand") else "") if x)
+        sub = run.get("source")
+        if sub and sub != R_PHOTOS:
+            folder3d = os.path.join(RUNS_ROOT, d, sub, "Original")
+            n = len([f for f in os.listdir(folder3d) if f.lower().endswith(".png")]) if os.path.isdir(folder3d) else ""
+        else:
+            n = (j.get("counts") or {}).get("Mooney", "")
+        out.append({"folder": d, "name": j.get("name", d), "group": j.get("group") or R_NO_GROUP, "saved": j.get("saved", ""),
+                    "settings": settings, "source": (run.get("source_name") or "Photos") + (f" · {n}" if n else ""),
+                    "note": j.get("note", "")})
+    return out
+
+
+def r_history(picked=(), armed=None, opened=None):
+    runs = r_saved_runs()
+    for r in runs:
+        r["kpis"] = run_kpis(r["folder"])
+    return rb.history(runs, picked or (), armed, opened)
+
+
+def r_history_click(picked, armed, opened, evt: gr.EventData):
+    """A click in the history: open, compare, delete. Returns history, picked, armed, opened, facts, table, figure,
+    comparison table, settings table, comparison note, the runs offered in Analysis → Compare runs, message."""
+    d = evt._data or {}
+    what, folder = d.get("act"), d.get("id") or ""
+    picked, msg = [p for p in (picked or []) if os.path.isdir(os.path.join(RUNS_ROOT, p))], ""
+    facts = table = fig = gr.update()
+    if what == "open":
+        opened = None if opened == folder else folder
+        facts, table, fig = r_show(opened)
+        armed = None
+    elif what == "pick":
+        picked = [p for p in picked if p != folder] if folder in picked else picked + [folder]
+    elif what == "publish" and folder and os.path.isdir(os.path.join(RUNS_ROOT, folder)):
+        try:
+            j = json.load(open(os.path.join(RUNS_ROOT, folder, "run.json"), encoding="utf-8"))
+        except Exception:
+            j = {}
+        _out, _n, msg = pub.publish(os.path.join(RUNS_ROOT, folder), DATA_ROOT, j.get("name") or folder, j.get("note", ""))
+        msg += " Nothing was committed or pushed; do that yourself when you want it on GitHub."
+    elif what == "delete":
+        armed = folder
+    elif what == "delete-no":
+        armed = None
+    elif what == "delete-yes" and folder and os.path.isdir(os.path.join(RUNS_ROOT, folder)):
+        trash = os.path.join(RUNS_ROOT, "_trash")
+        os.makedirs(trash, exist_ok=True)
+        dst, k = os.path.join(trash, folder), 2
+        while os.path.exists(dst):
+            dst = os.path.join(trash, f"{folder}-{k}"); k += 1
+        shutil.move(os.path.join(RUNS_ROOT, folder), dst)
+        _kpi_cache.pop(folder, None)
+        an.write_scores_index(RUNS_ROOT)
+        picked, armed = [p for p in picked if p != folder], None
+        if opened == folder:
+            opened, (facts, table, fig) = None, r_show(None)
+        msg = f"Moved “{folder}” to `runs/_trash/`. Nothing was erased; delete that folder yourself to free the space."
+    cmp_table, cmp_settings, cmp_note = r_compare(picked)
+    hist = r_history(picked, armed, opened)
+    return (hist, picked, armed, opened, facts, table, fig, cmp_table, cmp_settings, cmp_note,
+            gr.update(choices=run_choices()), msg, hash(hist))
+
+
+def r_open_result(folder, picked, armed, opened):
+    """'results' on a finished run of the board: open its saved copy in the history."""
+    if not folder or not os.path.isdir(os.path.join(RUNS_ROOT, folder)):
+        return (gr.update(),) * 6
+    hist = r_history(picked, armed, folder)
+    return (hist, hash(hist), folder) + r_show(folder)
+
+
+def r_duplicate():
+    """'Duplicate last run': the form takes the description of the run added last."""
+    items = [it for it in rq.snapshot(PROJECT_ROOT) if not run_is_old(it["config"])]
+    if not items:
+        return (gr.update(),) * R_FORM_N + ("There is no earlier run on the board to copy from.",)
+    last = max(enumerate(items), key=lambda p: (p[1].get("added", ""), p[0]))[1]
+    c = dict(last["config"])
+    c["name"] = f"{c['name']} copy"
+    return r_fill(c) + (f"The form holds a copy of “{last['name']}”. Change what you like and press *Add to group*.",)
+
+
+def r_publish_state(name):
+    """'Publish the current project state': the tables of the project as it is now, into data/<name>/ next to the code."""
+    if not str(name or "").strip():
+        return "Give the published results a name first."
+    _out, _n, msg = pub.publish(PROJECT_ROOT, DATA_ROOT, name, "the project as it was when published")
+    return msg + (" Nothing was committed or pushed; do that yourself when you want it on GitHub." if _out else "")
+
+
+def r_page(open_logs, picked, armed, opened, edit_id):
+    """The Runs page is opened: board, history, and the choices of the form that depend on the project."""
+    for _f in an.backfill_scores(RUNS_ROOT):                # older runs get their scores.json; nothing else in them changes
+        _kpi_cache.pop(_f, None)
+    html_, line, sig = r_view(open_logs)
+    hist = r_history(picked, armed, opened)
+    return (html_, line, sig, hist, hash(hist), gr.update(choices=r_sources()),
+            gr.update(choices=[R_NO_SET] + [f for _l, f in d3_set_choices()]), gr.update(choices=photo_set_choices()),
+            gr.update(choices=r_groups()), r_edit_note(edit_id))
+
+
+# ---------------------------------------------------------------------------- reading one saved run
 def run_folder_choices():
     return list(reversed(an.list_runs(RUNS_ROOT)))
 
@@ -1448,9 +1973,6 @@ def run_show(folder):
         lines.append("\nThis run holds no result tables.")
     return "\n".join(lines), table, fig
 
-
-def runs_page():
-    return gr.update(value=runs_table(), headers=RUNS_COLS), gr.update(choices=run_folder_choices())
 
 
 # ============================================================================ Vision systems on any dataset
@@ -1804,90 +2326,177 @@ def note_title(f):
     return os.path.splitext(f)[0]
 
 
-# ============================================================================ look
-ACCENT, ACCENT_DARK = "#1f4f82", "#7fb2e5"
+# ============================================================================ look: a white page, set like a paper
+# Light only. The app has one look; a dark system setting or ?__theme=dark does not change it (see HEAD and the loop below).
+ACCENT = "#1c3d6e"
+SERIF = "'Source Serif 4', 'Source Serif Pro', Georgia, 'Times New Roman', serif"
 THEME = gr.themes.Base(
     primary_hue=gr.themes.colors.blue, secondary_hue=gr.themes.colors.slate, neutral_hue=gr.themes.colors.slate,
     font=[gr.themes.GoogleFont("IBM Plex Sans"), "system-ui", "sans-serif"],
     font_mono=[gr.themes.GoogleFont("IBM Plex Mono"), "ui-monospace", "monospace"],
-    radius_size=gr.themes.sizes.radius_sm, spacing_size=gr.themes.sizes.spacing_sm, text_size=gr.themes.sizes.text_sm,
+    radius_size=gr.themes.sizes.radius_md, spacing_size=gr.themes.sizes.spacing_md, text_size=gr.themes.sizes.text_md,
 ).set(
-    body_background_fill="#f4f6f8", body_background_fill_dark="#12151a",
-    body_text_color="#1b1f24", body_text_color_dark="#e4e8ee",
-    block_background_fill="#ffffff", block_background_fill_dark="#1a1e24",
-    block_border_width="1px", block_border_color="#d5dbe3", block_border_color_dark="#2b323b",
-    block_label_background_fill="#ffffff", block_label_background_fill_dark="#1a1e24",
-    block_label_text_color="#55606d", block_label_text_color_dark="#9ba6b4", block_label_text_size="11px",
-    block_title_text_color="#55606d", block_title_text_color_dark="#9ba6b4", block_title_text_size="11px",
-    input_background_fill="#ffffff", input_background_fill_dark="#12151a",
-    input_border_color="#c5ccd6", input_border_color_dark="#343c47",
-    button_primary_background_fill=ACCENT, button_primary_background_fill_hover="#2a639e", button_primary_text_color="#ffffff",
-    button_primary_background_fill_dark="#2f6aa8", button_primary_background_fill_hover_dark="#3a7ac0", button_primary_text_color_dark="#ffffff",
-    button_secondary_background_fill="#ffffff", button_secondary_background_fill_dark="#1a1e24",
-    button_secondary_border_color="#aeb7c3", button_secondary_border_color_dark="#3a434f",
-    button_secondary_text_color="#1b1f24", button_secondary_text_color_dark="#e4e8ee",
-    slider_color=ACCENT, slider_color_dark=ACCENT_DARK,
-    checkbox_background_color_selected=ACCENT, checkbox_border_color_selected=ACCENT,
-    checkbox_background_color_selected_dark="#2f6aa8", checkbox_border_color_selected_dark="#2f6aa8",
+    body_background_fill="#ffffff", body_text_color="#15181d", body_text_color_subdued="#5c6672",
+    background_fill_primary="#ffffff", background_fill_secondary="#f7f8f9",
+    border_color_primary="#dfe3e8", border_color_accent=ACCENT, color_accent=ACCENT, color_accent_soft="#e8eef7",
+    link_text_color=ACCENT, link_text_color_hover="#27518f", link_text_color_visited=ACCENT, link_text_color_active=ACCENT,
+    block_background_fill="#ffffff", block_border_width="1px", block_border_color="#dfe3e8", block_shadow="none",
+    block_label_background_fill="#ffffff", block_label_border_width="0px", block_label_text_color="#5c6672", block_label_text_size="12px",
+    block_title_text_color="#5c6672", block_title_text_size="12px", block_title_text_weight="500", block_info_text_color="#5c6672",
+    panel_background_fill="#ffffff", panel_border_color="#dfe3e8",
+    input_background_fill="#ffffff", input_background_fill_focus="#ffffff", input_border_color="#cfd5dc", input_border_color_focus=ACCENT,
+    input_shadow="none", input_shadow_focus="0 0 0 3px rgba(28,61,110,.12)", input_placeholder_color="#8d96a1",
+    button_primary_background_fill=ACCENT, button_primary_background_fill_hover="#27518f", button_primary_text_color="#ffffff",
+    button_primary_border_color=ACCENT, button_primary_shadow="none", button_primary_shadow_hover="none",
+    button_secondary_background_fill="#ffffff", button_secondary_background_fill_hover="#f3f5f8", button_secondary_border_color="#cfd5dc",
+    button_secondary_text_color="#15181d", button_secondary_shadow="none", button_secondary_shadow_hover="none",
+    button_cancel_background_fill="#ffffff", button_cancel_background_fill_hover="#fbecea", button_cancel_text_color="#a5352c",
+    button_cancel_border_color="#e9c2bd", button_cancel_shadow="none",
+    button_large_radius="6px", button_small_radius="6px", button_medium_radius="6px",
+    slider_color=ACCENT, checkbox_background_color_selected=ACCENT, checkbox_border_color_selected=ACCENT,
+    checkbox_border_color="#b8c0ca", checkbox_label_background_fill="#ffffff", checkbox_label_background_fill_hover="#f3f5f8",
+    checkbox_label_background_fill_selected="#eef2f8", checkbox_label_border_color="#dfe3e8", checkbox_label_shadow="none",
+    table_even_background_fill="#ffffff", table_odd_background_fill="#ffffff", table_border_color="#e6e9ed", table_row_focus="#eef2f8",
+    table_text_color="#15181d", code_background_fill="#f3f5f7",
 )
+for _k in [k for k in dir(THEME) if k.endswith("_dark") and not k.startswith("_")]:   # the dark variant is the light one
+    if hasattr(THEME, _k[:-5]):
+        setattr(THEME, _k, getattr(THEME, _k[:-5]))
+# Loaded before the page draws: the serif for headings and documents, and a guard that keeps the page light whatever
+# the system or the address says.
+HEAD = """
+<meta name="color-scheme" content="light only">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+<script>
+(function () {
+  try {
+    var u = new URL(window.location.href);
+    if (u.searchParams.get('__theme') && u.searchParams.get('__theme') !== 'light') {
+      u.searchParams.set('__theme', 'light'); window.history.replaceState(null, '', u.toString());
+    }
+  } catch (e) {}
+  function light() {
+    document.documentElement.classList.remove('dark');
+    if (document.body) { document.body.classList.remove('dark'); }
+  }
+  light();
+  document.addEventListener('DOMContentLoaded', function () {
+    light();
+    new MutationObserver(light).observe(document.body, {attributes: true, attributeFilter: ['class']});
+  });
+  new MutationObserver(light).observe(document.documentElement, {attributes: true, attributeFilter: ['class']});
+})();
+</script>
+"""
 CSS = """
-:root, .gradio-container { --ink:#1b1f24; --muted:#5b6672; --line:#d5dbe3; --card:#ffffff; --accent:#1f4f82;
-  --ok:#17764f; --ok-bg:#e7f4ee; --part:#8a5a00; --part-bg:#fbf2dd; }
-.dark, .dark .gradio-container { --ink:#e4e8ee; --muted:#9ba6b4; --line:#2b323b; --card:#1a1e24; --accent:#7fb2e5;
-  --ok:#62cfa2; --ok-bg:#15302a; --part:#e3b964; --part-bg:#33290f; }
-.gradio-container { max-width: 1480px !important; }
+:root, .gradio-container { color-scheme: light;
+  --ink:#15181d; --ink-2:#2c323a; --muted:#5c6672; --muted-2:#8d96a1; --line:#dfe3e8; --line-2:#eceef1; --card:#ffffff; --paper-2:#f7f8f9;
+  --accent:#1c3d6e; --accent-2:#27518f; --accent-soft:#9db3d1; --accent-wash:rgba(28,61,110,.07);
+  --ok:#1a7350; --ok-bg:#e8f4ee; --ok-line:#bcdccb; --run-bg:#e8eef7; --run-line:#bccde4; --wait-bg:#eef0f3;
+  --bad:#a5352c; --bad-bg:#fbecea; --bad-line:#e9c2bd; --part:#865d00; --part-bg:#fbf3dc; --part-line:#e6d29a;
+  --log-bg:#f6f7f8; --log-ink:#2a3038;
+  --serif: 'Source Serif 4', 'Source Serif Pro', Georgia, 'Times New Roman', serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace; }
+body, .gradio-container { background: #ffffff !important; }
+.gradio-container { max-width: 1400px !important; padding: 22px 34px 60px !important; }
 footer { display: none !important; }
-#head { display: flex; align-items: center; gap: 12px; padding: 4px 0 2px; }
-#head .mark { width: 30px; height: 30px; border-radius: 50%; flex: none; border: 1.5px solid var(--ink);
+
+/* title block */
+#head { display: flex; align-items: center; gap: 14px; padding: 2px 0 6px; }
+#head .mark { width: 34px; height: 34px; border-radius: 50%; flex: none; border: 1.5px solid var(--ink);
   background: linear-gradient(115deg, var(--ink) 0 52%, var(--card) 52% 100%); }
-#head h1 { font-size: 21px; font-weight: 600; letter-spacing: -0.01em; margin: 0; color: var(--ink); line-height: 1.15; }
-#head .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
-.chips { margin-top: 2px; }
+#head h1 { font-family: var(--serif); font-size: 27px; font-weight: 600; letter-spacing: -0.01em; margin: 0; color: var(--ink); line-height: 1.1; }
+#head .sub { font-family: var(--serif); font-style: italic; font-size: 14.5px; color: var(--muted); margin-top: 3px; }
+.chips { margin: 4px 0 2px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 .chip { display: inline-block; border: 1px solid var(--line); background: var(--card); color: var(--muted);
-  padding: 2px 9px; margin: 0 6px 6px 0; border-radius: 3px; font-size: 12px; white-space: nowrap; }
-.chip b { color: var(--ink); font-weight: 600; margin-left: 3px; font-variant-numeric: tabular-nums; }
-.chip.ok { border-color: var(--ok); background: var(--ok-bg); } .chip.ok b { color: var(--ok); }
-.chip.part { border-color: var(--part); background: var(--part-bg); } .chip.part b { color: var(--part); }
-#shell { align-items: flex-start; gap: 22px; flex-wrap: nowrap; }
-#navcol { flex: 0 0 158px !important; min-width: 158px !important; position: sticky; top: 10px; align-self: flex-start; gap: 2px !important;
-  border-right: 1px solid var(--line); padding-right: 10px; }
-#navcol button { justify-content: flex-start; text-align: left; border: none !important; border-left: 3px solid transparent !important;
-  border-radius: 0 3px 3px 0; background: transparent; box-shadow: none; font-weight: 500; font-size: 13.5px; padding: 8px 11px;
-  color: var(--muted); min-width: 0; }
-#navcol button:hover { color: var(--ink); background: color-mix(in srgb, var(--line) 40%, transparent); }
-#navcol button.primary { border-left-color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 11%, transparent);
-  color: var(--accent); font-weight: 600; }
+  padding: 2px 11px; margin: 0 7px 6px 0; border-radius: 12px; font-size: 12.5px; white-space: nowrap; }
+.chip b { color: var(--ink); font-weight: 600; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.chip.ok { border-color: var(--ok-line); background: var(--ok-bg); } .chip.ok b { color: var(--ok); }
+.chip.part { border-color: var(--part-line); background: var(--part-bg); } .chip.part b { color: var(--part); }
+
+/* the menu on the left and the pages */
+#shell { align-items: flex-start; gap: 34px; flex-wrap: nowrap; margin-top: 10px; }
+#navcol { flex: 0 0 164px !important; min-width: 164px !important; position: sticky; top: 14px; align-self: flex-start; gap: 2px !important; }
+#navcol button { justify-content: flex-start; text-align: left; border: none !important; border-left: 2px solid transparent !important;
+  border-radius: 0 6px 6px 0 !important; background: transparent !important; box-shadow: none !important; font-family: var(--serif);
+  font-weight: 400; font-size: 16.5px; padding: 8px 14px; color: var(--muted); min-width: 0; }
+#navcol button:hover { color: var(--ink); background: var(--paper-2) !important; }
+#navcol button.primary { border-left-color: var(--accent) !important; background: var(--accent-wash) !important; color: var(--accent); font-weight: 600; }
 #main { min-width: 0; flex: 1 1 0 !important; }
 @media (max-width: 900px) {
+  .gradio-container { padding: 14px 14px 40px !important; }
   #shell { flex-wrap: wrap; gap: 8px; }
-  #navcol { flex: 1 1 100% !important; flex-direction: row !important; flex-wrap: wrap; position: static; border-right: none;
-    border-bottom: 1px solid var(--line); padding: 0 0 6px; }
-  #navcol button { flex: 0 0 auto; width: auto; border-left: none !important; border-bottom: 3px solid transparent !important; border-radius: 3px 3px 0 0; }
+  #navcol { flex: 1 1 100% !important; flex-direction: row !important; flex-wrap: wrap; position: static; border-bottom: 1px solid var(--line); padding: 0 0 6px; }
+  #navcol button { flex: 0 0 auto; width: auto; border-left: none !important; border-bottom: 2px solid transparent !important; border-radius: 6px 6px 0 0 !important; }
   #navcol button.primary { border-bottom-color: var(--accent) !important; }
 }
-.tabs > .tab-nav button, .tab-wrapper button { font-size: 12.5px; letter-spacing: 0.02em; }
-.tabs > .tab-nav button.selected, .tab-wrapper button.selected { color: var(--accent) !important; border-bottom: 2px solid var(--accent) !important; font-weight: 600; }
-.hint, .hint p { font-size: 12px; color: var(--muted); }
-.mono, .mono * { font-family: 'IBM Plex Mono', ui-monospace, monospace; }
-.lead p { font-size: 13px; color: var(--ink); max-width: 110ch; }
-.prose { max-width: 105ch; } .prose h1 { font-size: 20px; } .prose h2 { font-size: 16px; margin-top: 22px; border-bottom: 1px solid var(--line); padding-bottom: 3px; }
-.prose h3 { font-size: 13.5px; margin-top: 16px; } .prose p, .prose li { font-size: 13px; line-height: 1.55; }
-table { font-size: 12.5px; } table td, table th { padding: 3px 9px !important; font-variant-numeric: tabular-nums; }
-.prose table { border-collapse: collapse; border: 1px solid var(--line); }
-.prose table td, .prose table th { border: 1px solid var(--line) !important; padding: 5px 11px !important; vertical-align: top; }
-.prose table th { background: color-mix(in srgb, var(--line) 35%, transparent); color: var(--ink); font-weight: 600; text-align: left; white-space: nowrap; }
-.ov table td:first-child, .ov table td:nth-child(2), .folders table td:first-child { white-space: nowrap; }
+.tab-wrapper, .tabs > .tab-nav { margin-bottom: 12px; }
+.tabs > .tab-nav button, .tab-wrapper button { font-size: 14px; color: var(--muted); padding: 8px 14px !important; }
+.tabs > .tab-nav button.selected, .tab-wrapper button.selected { color: var(--accent) !important; font-weight: 600; }
+.tab-wrapper button.selected::after { background: var(--accent) !important; }
+
+/* text */
+.hint, .hint p { font-size: 13px; color: var(--muted); line-height: 1.5; max-width: 96ch; }
+.mono, .mono * { font-family: var(--mono); }
+.lead p { font-size: 15px; line-height: 1.55; color: var(--ink-2); max-width: 82ch; margin-bottom: 4px; }
+.block.prose { max-width: 78ch; }
+.block.prose p, .block.prose li { font-family: var(--serif); font-size: 16px; line-height: 1.62; color: var(--ink-2); }
+.block.prose h1, .block.prose h2, .block.prose h3, .block.prose h4 { font-family: var(--serif); color: var(--ink); letter-spacing: -0.005em; }
+.block.prose h1 { font-size: 28px; font-weight: 600; margin: 4px 0 10px; }
+.block.prose h2 { font-size: 21px; font-weight: 600; margin-top: 30px; padding-bottom: 5px; border-bottom: 1px solid var(--line); }
+.block.prose h3 { font-size: 17px; font-weight: 600; margin-top: 22px; }
+.block.prose a { color: var(--accent); text-decoration: underline; text-decoration-color: var(--accent-soft); text-underline-offset: 2px; }
+.block.prose code, .lead code, .hint code { font-family: var(--mono); font-size: .86em; background: var(--paper-2); border: 1px solid var(--line-2);
+  border-radius: 4px; padding: 0 4px; }
+.block.prose.wide, .block.prose.ov, .block.prose.folders { max-width: 112ch; }
+h2.zone { font-family: var(--serif); font-size: 21px; font-weight: 600; color: var(--ink); margin: 26px 0 4px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
+h2.zone span { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 12px; font-weight: 600; color: var(--accent); background: var(--run-bg);
+  width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
+.caption, .caption p { font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--muted); max-width: 86ch; margin-top: -2px; }
+
+/* tables in the manner of a paper: a rule above and below, light lines between rows, no boxes */
+.block.prose table { border-collapse: collapse; border: none !important; border-top: 1.5px solid var(--ink) !important;
+  border-bottom: 1.5px solid var(--ink) !important; margin: 10px 0 16px;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+.block.prose table td, .block.prose table th { border: none !important; border-bottom: 1px solid var(--line-2) !important; padding: 6px 14px 6px 0 !important;
+  vertical-align: top; font-size: 13.5px; line-height: 1.45; font-variant-numeric: tabular-nums; font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+.block.prose table th { border-bottom: 1px solid var(--ink) !important; color: var(--ink); font-weight: 600; text-align: left; background: none; white-space: nowrap; }
+.block.prose table tr:last-child td { border-bottom: none !important; }
+.block.prose table td, .block.prose table th { word-break: normal !important; overflow-wrap: normal; }
+.block.prose table td code { white-space: nowrap; }
+.block.prose table tr, .block.prose table thead, .block.prose table tbody { border-left: none !important; border-right: none !important; }
+.block.ov table td:first-child, .ov table td:nth-child(2), .folders table td:first-child { white-space: nowrap; }
 .folders table td .mono { word-break: break-all; font-size: 12px; }
-.prose code { font-size: 12px; }
-.block label > span, .block .label-wrap span { font-size: 11.5px; color: var(--muted); }
-button.secondary { border: 1px solid var(--line) !important; }
-button.stop { border: 1px solid #b3261e !important; }
-.log textarea { font-family: 'IBM Plex Mono', ui-monospace, monospace !important; font-size: 12px !important; line-height: 1.5 !important; white-space: pre !important; overflow-x: auto !important; }
-.system { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 2px; }
+.gradio-container .table-wrap { border: none !important; border-top: 1.5px solid var(--ink) !important; border-bottom: 1.5px solid var(--ink) !important;
+  border-radius: 0 !important; }
+.gradio-container .table-wrap, .gradio-container .table-wrap * { font-family: 'IBM Plex Sans', system-ui, sans-serif !important; }
+.gradio-container .table-wrap td, .gradio-container .table-wrap th { font-size: 13px !important; }
+.gradio-container .table-wrap thead th { border-bottom: 1px solid var(--ink) !important; background: #ffffff !important; font-weight: 600; }
+.gradio-container .table-wrap td, .gradio-container .table-wrap th { border-left: none !important; border-right: none !important;
+  font-variant-numeric: tabular-nums; }
+.gradio-container .table-wrap tbody td { border-bottom: 1px solid var(--line-2) !important; }
+
+/* controls */
+.block label > span, .block .label-wrap span { font-size: 12.5px; color: var(--muted); }
+button.lg, button.md, button.sm { font-weight: 600; }
+button.secondary { border: 1px solid #cfd5dc !important; }
+#navcol button.secondary { border: none !important; border-left: 2px solid transparent !important; }
+button.stop { border: 1px solid var(--bad-line) !important; color: var(--bad) !important; background: #ffffff !important; }
+button.stop:hover { background: var(--bad-bg) !important; }
+.log textarea { font-family: var(--mono) !important; font-size: 12.5px !important; line-height: 1.55 !important; white-space: pre !important;
+  overflow-x: auto !important; background: var(--log-bg) !important; color: var(--log-ink) !important; }
+.system { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 4px; }
 .system h4, .system strong { color: var(--ink); }
-.pos { text-align: center; font-size: 12px; color: var(--muted); padding-top: 6px; font-variant-numeric: tabular-nums; }
-.gallery-item, .thumbnail-item { border-radius: 2px !important; }
-"""
+.pos { text-align: center; font-size: 12.5px; color: var(--muted); padding-top: 6px; font-variant-numeric: tabular-nums; }
+.gallery-item, .thumbnail-item { border-radius: 4px !important; }
+.stage-panel { border: 1px solid var(--accent-soft) !important; border-radius: 8px !important; background: #ffffff !important; margin-top: 2px; }
+.stage-panel > .styler { background: #ffffff !important; }
+.stage-panel .hint { padding: 2px 14px 10px; }
+.gradio-container .html-container { padding: 0 !important; }
+#r-line p { font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px; color: var(--ink-2); }
+""" + rb.CSS
 
 
 # ============================================================================ interface
@@ -1989,6 +2598,21 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                             s_fill = gr.Button("Fill up from favourites", scale=1)
                             s_del = gr.Button("Delete this subset", scale=1)
                         s_msg = gr.Markdown(elem_classes="hint")
+                        with gr.Accordion("Create random subsets", open=False):
+                            with gr.Row():
+                                sx_pool = gr.Radio(SUBSET_SHOW, value=SUBSET_SHOW[0], label="Draw from", scale=2)
+                                sx_size = gr.Number(_sub0["sets"].get(_sub_name, {}).get("size", TARGET_SUBSET), label="Size of each subset",
+                                                    precision=0, minimum=1, maximum=500, scale=1, min_width=110)
+                                sx_count = gr.Number(1, label="How many subsets", precision=0, minimum=1, maximum=100, scale=1, min_width=110)
+                                sx_stem = gr.Textbox("random", label="Name stem (random 1, random 2, …)", max_lines=1, scale=2)
+                                sx_seed = gr.Number(0, label="Seed", precision=0, scale=1, min_width=90)
+                            with gr.Row():
+                                sx_person = gr.Checkbox(True, label="One photo per person (no person twice inside a subset)", scale=2)
+                                sx_disjoint = gr.Checkbox(True, label="Subsets do not share photos", scale=2)
+                                sx_go = gr.Button("Create", variant="primary", scale=1)
+                            gr.Markdown("A photo never appears twice in one subset. The same seed and the same pool give the same subsets, so a "
+                                        "draw can be repeated; pool, seed and both options are stored with each subset in `subsets.json`. "
+                                        "The project's subset is not changed.", elem_classes="hint")
                         gr.Markdown("Each saved subset is a folder `Subsets/<name>/` with `Original/` and `Mooney/`. The project's subset is "
                                     "also in `Subset/`: the counter at the top shows it. Subsets can be chosen wherever a step runs on part "
                                     "of the photos (system 2, 3D datasets).", elem_classes="hint")
@@ -2158,7 +2782,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         v_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
                         v_fig = gr.Image(show_label=False, height=380)
                         gr.Markdown("### Save this state as a run\n<span class='hint'>A run is a frozen copy of the Mooneys, their values and the "
-                                    "results under a name, in the runs folder. Saved runs are listed in **Saved runs** and compared in "
+                                    "results under a name, in the runs folder. Saved runs are listed in **Runs → History** and compared in "
                                     "**Analysis → Compare runs**.</span>", elem_classes="prose")
                         with gr.Row():
                             v_run_name = gr.Textbox("", label="Save run as…", placeholder="for example: final run", scale=2, max_lines=1)
@@ -2198,93 +2822,103 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                                                   "person (system 1 ranks against the other photos; system 2 is asked for the name)")
                             v_src = gr.Radio(["Original", "Raw"], value="Original", label="Source folder of the photos")
 
-                    # -------------------------------------------------------------- One-button run
-                    with gr.Tab("One-button run") as tab_run:
-                        gr.Markdown("One full run with one button. Give it a name, tick the steps and set their values, then press **Run**, or "
-                                    "**Add to queue** to let several runs go one after another. Every step does exactly what its own page "
-                                    "does, in this order; the log shows where it is. At the end the run is saved under its name and date.",
-                                    elem_classes="lead")
+                    # -------------------------------------------------------------- Runs
+                    with gr.Tab("Runs") as tab_runs:
+                        gr.Markdown("Build a run from stages, put runs into groups, and let a group work through its runs on its own. "
+                                    "A run takes one source (the photos or a 3D dataset) through the stages you switch on; every stage "
+                                    "does exactly what its own page does. " + QUEUE_NOTE, elem_classes="lead")
+
+                        gr.HTML("<h2 class='zone'><span>1</span> New run</h2>")
                         with gr.Row():
-                            p_name = gr.Textbox("", label="Name of the run", placeholder="for example: final run", scale=2, max_lines=1)
-                            p_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=3, max_lines=1,
-                                                placeholder="for example: blur 6, 23 % white, 22 Mooneys adjusted by hand")
-                        with gr.Group():
-                            p_batch = gr.Checkbox(True, label="Step 1 · Make the Mooneys (same as Batch; Mooneys adjusted by hand are kept)")
+                            r_name = gr.Textbox("", label="Run name", placeholder="for example: photos, final values", scale=3, max_lines=1)
+                            r_group = gr.Dropdown(choices=r_groups(), value=r_groups()[0], label="Group (pick one or type a new name)",
+                                                  allow_custom_value=True, scale=2)
+                            r_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=4, max_lines=1,
+                                                placeholder="for example: blur 6.5, 20 % white, 71 adjusted by hand")
+                        r_on = gr.State(dict(R_ON))
+                        r_sel = gr.State("source")
+                        r_edit = gr.State("")
+                        _r0 = (R_SOURCES[R_PHOTOS], R_NO_SET, vlm_scope_label(), _st["sigma"], _st["white"],
+                               _st["bg_mode"] if _st["bg_mode"] in ("black", "white") else "black", _st["bg_level"],
+                               [R_SYS[n] for n in (1, 3, 4)], [an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT], dict(R_ON))
+                        r_cards_html = gr.HTML(r_cards("source", *_r0), js_on_load=rb.JS, elem_id="r-cards")
+                        with gr.Group(visible=True, elem_classes="stage-panel") as r_p_source:
                             with gr.Row():
-                                p_sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (px)")
-                                p_white = gr.Slider(5, 60, value=_st["white"], step=0.5, label="White share of the face (%)")
-                                p_bg = gr.Radio(["black", "white"], value=_st["bg_mode"] if _st["bg_mode"] in ("black", "white") else "black",
-                                                label="Background of the Mooney")
-                                p_bgl = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray")
+                                r_source = gr.Radio(r_sources(), value=R_SOURCES[R_PHOTOS], label="Source of this run", scale=3,
+                                                    info="A 3D source is offered once it has renders (Dataset → 3D datasets).")
+                                r_saved = gr.Dropdown([R_NO_SET] + [f for _l, f in d3_set_choices()], value=R_NO_SET, scale=2,
+                                                      label="Or a saved 3D dataset (loaded as the live one first)")
+                                r_vlm_set = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=2)
+                        with gr.Group(visible=False, elem_classes="stage-panel") as r_p_mooneys:
+                            with gr.Row():
+                                r_sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (px)")
+                                r_white = gr.Slider(5, 60, value=_st["white"], step=0.5, label="White share (%)")
+                                r_bg = gr.Radio(["black", "white"], value=_r0[5], label="Background of the Mooney")
+                                r_bgl = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray")
+                            gr.Markdown("Switched off, the run uses the Mooneys as they are. Switched on, it makes them again with these values "
+                                        "and saves the values as the project's defaults; for photos, Mooneys adjusted by hand are kept. "
+                                        "Other options (white rule, preprocessing) come from **Mooney → Batch**.", elem_classes="hint")
+                        with gr.Group(visible=False, elem_classes="stage-panel") as r_p_systems:
+                            r_systems = gr.CheckboxGroup([R_SYS[n] for n in (1, 2, 3, 4)], value=_r0[7],
+                                                         label="Vision systems of this run, on every original (or render) and its Mooney")
+                            gr.Markdown("For a 3D source the run then scores systems 3 and 4 against the true depth. System 2 runs only on "
+                                        "photos, on the set chosen in the Source stage, and is skipped if Ollama is not running.",
+                                        elem_classes="hint")
+                        with gr.Group(visible=False, elem_classes="stage-panel") as r_p_export:
+                            gr.Markdown("Writes the summary table and figure to `figures/` (for photos also one panel per favourite; for a 3D "
+                                        "source the table by light direction), and the comparison of the stimulus sets. Nothing to set.",
+                                        elem_classes="hint")
+                        with gr.Group(visible=False, elem_classes="stage-panel") as r_p_save:
+                            r_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=_r0[8],
+                                                      label="The saved copy includes, besides the Mooneys and their values")
                         with gr.Row():
-                            p_systems = gr.CheckboxGroup(PIPE_SYSTEMS, value=[PIPE_SYSTEMS[0], PIPE_SYSTEMS[2], PIPE_SYSTEMS[3]],
-                                                         label="Step 2 · Vision systems, on every original and every Mooney", scale=3)
-                        with gr.Row():
-                            p_3d = gr.CheckboxGroup(list(D3_SOURCES), value=[], scale=3,
-                                                    label="Step 3 · 3D faces: render, make Mooneys, run systems 1, 3 and 4 against the true depth")
-                            p_faces = gr.Slider(2, 30, value=cfg.BASEL_FACES, step=1, label="Basel faces", scale=1)
-                        with gr.Row():
-                            p_vlm_set = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=1)
-                            p_3d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="Reconstructed 3D uses", scale=1)
-                            p_fit_set = gr.Dropdown(photo_set_choices(), value=fit_default_set(), label="Basel fitted 3D uses", scale=1)
-                        with gr.Row():
-                            p_export = gr.Checkbox(True, label="Step 4 · Export figures", scale=1)
-                            p_save = gr.Checkbox(True, label="Step 5 · Save the run under its name", scale=1)
-                            p_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
-                                                      label="The saved run includes, besides the Mooneys and their values", scale=3)
-                        gr.Markdown("The two photo-based 3D sources use the chosen photos and the five default lights; the fitted heads are drawn "
-                                    "frontal with cast shadows. Invented Basel faces are whole heads, frontal, with cast shadows. For other "
-                                    "choices use **Dataset → 3D datasets**. Other Batch options (white rule, preprocessing) are taken from the "
-                                    "saved defaults.", elem_classes="hint")
-                        with gr.Row():
-                            p_run = gr.Button("Run", variant="primary", scale=2)
-                            p_stop = gr.Button("Stop", variant="stop", scale=0, min_width=80)
-                            p_queue = gr.Button("Add to queue", scale=1)
-                            p_only = gr.Button("Only save the current state as a run", scale=1)
-                        p_msg = gr.Markdown(elem_classes="hint")
-                        p_log = gr.Textbox(label="Log", lines=12, max_lines=12, interactive=False, autoscroll=True, elem_classes="log")
-                        gr.Markdown("### Results of the current state", elem_classes="prose")
-                        p_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
-                        p_fig = gr.Image(show_label=False, height=380)
-                        p_cmp = gr.Dataframe(interactive=False, wrap=True, max_height=520, column_widths=["40%"] + ["15%"] * len(a3.SETS),
-                                             label="Photos and 3D sets side by side (empty until a 3D step has run)")
+                            r_add_btn = gr.Button("Add to group", variant="primary", scale=2)
+                            r_now_btn = gr.Button("Run now", scale=1)
+                            r_dup_btn = gr.Button("Duplicate last run", scale=1)
+                            r_cancel_btn = gr.Button("Cancel edit", scale=1)
+                        r_edit_md = gr.Markdown(elem_classes="hint")
+                        r_msg = gr.Markdown(elem_classes="hint")
 
-                    # -------------------------------------------------------------- Queue
-                    with gr.Tab("Queue") as tab_queue:
-                        gr.Markdown("Runs that go one after another without you. Set a run up in **One-button run** and press *Add to queue*; "
-                                    "start the queue here. A run that fails is marked and the next one starts. *Stop now* ends the run that is working "
-                                    "(it is not saved) and halts the queue. " + QUEUE_NOTE, elem_classes="lead")
-                        q_line = gr.Markdown(elem_classes="prose")
+                        gr.HTML("<h2 class='zone'><span>2</span> Groups and queue</h2>")
                         with gr.Row():
-                            q_start = gr.Button("Start queue", variant="primary", scale=2)
-                            q_stop = gr.Button("Stop after the current run", scale=1)
-                            q_stop_now = gr.Button("Stop now", variant="stop", scale=1)
-                            q_clear = gr.Button("Clear finished", scale=1)
-                            q_refresh = gr.Button("Refresh", scale=0, min_width=90)
-                        q_table = gr.Dataframe(headers=QUEUE_COLS, interactive=False, wrap=True,
-                                               column_widths=["5%", "18%", "9%", "13%", "13%", "8%", "34%"])
+                            r_line = gr.Markdown(elem_classes="prose", elem_id="r-line")
                         with gr.Row():
-                            q_item = gr.Dropdown(choices=[], label="An item of the queue", scale=3)
-                            q_up = gr.Button("Move up", scale=1)
-                            q_down = gr.Button("Move down", scale=1)
-                            q_remove = gr.Button("Remove", variant="stop", scale=1)
-                        q_msg = gr.Markdown(elem_classes="hint")
-                        q_log = gr.Textbox(label="Log", lines=14, max_lines=14, interactive=False, autoscroll=True, elem_classes="log")
-                        gr.Markdown("The queue is kept in the project (`queue.json`), so it is still there after a restart; a run that was "
+                            r_all = gr.Button("Run all groups", variant="primary", scale=2)
+                            r_stop_after_btn = gr.Button("Stop after the current run", scale=2)
+                            r_stop_now_btn = gr.Button("Stop now", variant="stop", scale=1)
+                            r_clear_btn = gr.Button("Clear finished", scale=1)
+                        r_board_html = gr.HTML(r_board(), js_on_load=rb.JS, elem_id="r-board")
+                        r_open = gr.State([])
+                        r_sig = gr.State(0)
+                        r_want = gr.State("")
+                        gr.Markdown("The board is kept in the project (`queue.json`), so it is still there after a restart; a run that was "
                                     "working when the app was closed is marked *stopped*. The app must stay open and the computer awake "
-                                    "while the queue runs. This page refreshes itself every few seconds.", elem_classes="hint")
-                        q_timer = gr.Timer(4, active=False)
+                                    "while runs work. This page follows them by itself.", elem_classes="hint")
 
-                    # -------------------------------------------------------------- Saved runs
-                    with gr.Tab("Saved runs") as tab_runs:
-                        gr.Markdown("Every saved run, newest first. A run is a folder in the runs folder shown on Home: the Mooneys, the values "
-                                    "they were made with, and the results, frozen at the moment of saving. Put runs side by side in "
-                                    "**Analysis → Compare runs**.", elem_classes="lead")
-                        p_runs = gr.Dataframe(headers=RUNS_COLS, interactive=False, wrap=True, column_widths=RUNS_WIDTHS)
-                        sr_pick = gr.Dropdown(choices=run_folder_choices(), label="Show a saved run")
+                        gr.HTML("<h2 class='zone'><span>3</span> History</h2>")
+                        h_html = gr.HTML(r_history(), js_on_load=rb.JS, elem_id="r-history")
+                        h_picked = gr.State([])
+                        h_armed = gr.State(None)
+                        h_opened = gr.State(None)
+                        h_sig = gr.State(0)
+                        h_msg = gr.Markdown(elem_classes="hint")
+                        with gr.Accordion("Publish results as tables (for the repository's data/ folder)", open=False):
+                            gr.Markdown("*publish* on a saved run, or the button here for the project as it is now, writes a copy of the "
+                                        "numbers to `data/<name>/` next to the code: scores, settings and the per-photo tables of the "
+                                        "systems. **No photo, Mooney, depth map, render or panel is copied, and nothing of the Basel Face "
+                                        "Model.** The app does not commit or push; `data/README.md` lists what is there.",
+                                        elem_classes="hint")
+                            with gr.Row():
+                                h_pub_name = gr.Textbox("", label="Name for the published project state", placeholder="for example: final state",
+                                                        max_lines=1, scale=3)
+                                h_pub_btn = gr.Button("Publish the current project state", scale=2)
                         sr_facts = gr.Markdown(elem_classes="prose")
-                        sr_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary of this run", wrap=True, interactive=False)
-                        sr_fig = gr.Image(show_label=False, height=380)
+                        sr_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary of the opened run", wrap=True, interactive=False, visible=False)
+                        sr_fig = gr.Image(show_label=False, height=380, visible=False)
+                        h_cmp_note = gr.Markdown(elem_classes="hint")
+                        h_cmp = gr.Dataframe(interactive=False, wrap=True, label="Chosen runs side by side", visible=False)
+                        h_cmp_settings = gr.Dataframe(interactive=False, wrap=True, label="What each run was made with", visible=False)
+                        r_timer = gr.Timer(3, active=False)
 
             # ================================================================== Analysis
             with gr.Column(visible=False) as sec_analysis:
@@ -2452,7 +3086,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     demo.load(refresh_page, None, [status, overview, ds_gallery, ds_table, b_gal, b_tab, b_favs, fav_gal, d_files, c_runs])
 
     # Stop: the job that is working ends after the image or step it is on (see run_logged)
-    for _b in (ds_stop, d_stop, b_stop, v_stop, p_stop):
+    for _b in (ds_stop, d_stop, b_stop, v_stop):
         _b.click(stop_job, None, None, show_progress="hidden")
 
     # ---------------------------------------------------------------------- Home
@@ -2480,6 +3114,10 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     s_fill.click(subset_fill, s_args, s_shown)
     s_save.click(subset_save, s_args + [s_active], s_shown + [s_pick, status])
     s_del.click(subset_delete, [s_name, s_show], [s_name, s_size] + s_shown + [s_pick, status])
+    sx_go.click(subset_random, [sx_pool, sx_size, sx_count, sx_stem, sx_seed, sx_person, sx_disjoint, s_show],
+                [s_name, s_size] + s_shown + [s_pick, status])
+    s_show.change(lambda v: v, s_show, sx_pool, show_progress="hidden")
+    s_size.change(lambda v: v, s_size, sx_size, show_progress="hidden")
 
     # ---------------------------------------------------------------------- Dataset → 3D datasets
     d_live = [d_state, d_gal_o, d_gal_m]
@@ -2553,45 +3191,56 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     o_start.click(ollama_start, None, [o_line, v_model, v_s2])
     o_pull.click(ollama_pull, o_name, [v_log, o_line, v_model, v_s2])
 
-    # ---------------------------------------------------------------------- Experiments → One-button run, Queue, Saved runs
-    p_form = [p_name, p_note, p_keep, p_batch, p_sigma, p_white, p_bg, p_bgl, p_systems, p_3d, p_faces, p_export, p_save,
-              p_vlm_set, p_3d_set, p_fit_set]
-    p_shown = [p_msg, p_table, p_fig, p_cmp]
-    p_run.click(pipeline, p_form, [p_log] + p_shown + [status, c_runs])
-    p_queue.click(queue_add, p_form, p_msg)
-    p_only.click(pipeline_save_only, [p_name, p_keep, p_note], [p_msg, c_runs])
+    # ---------------------------------------------------------------------- Experiments → Runs
+    r_form = [r_name, r_group, r_note, r_source, r_saved, r_vlm_set, r_sigma, r_white, r_bg, r_bgl, r_systems, r_keep, r_on]
+    r_card_in = [r_source, r_saved, r_vlm_set, r_sigma, r_white, r_bg, r_bgl, r_systems, r_keep]
+    r_panel_boxes = [r_p_source, r_p_mooneys, r_p_systems, r_p_export, r_p_save]
+    r_fill_out = [r_name, r_group, r_note, r_source, r_saved, r_vlm_set, r_sigma, r_white, r_bg, r_bgl, r_systems, r_keep, r_on, r_sel,
+                  r_cards_html] + r_panel_boxes
+    assert len(r_fill_out) == R_FORM_N
+    r_shown = [r_board_html, r_line, r_sig]
 
-    def run_page():
-        return pipeline_view() + (gr.update(choices=photo_set_choices(), value=vlm_scope_label()),
-                                  gr.update(choices=photo_set_choices(suggest=True)), gr.update(choices=photo_set_choices()))
+    # the stage cards: a click selects a stage or flips its switch; any change of a field redraws the summaries
+    r_cards_html.click(r_card_click, [r_sel, r_on] + r_card_in, [r_sel, r_on, r_cards_html] + r_panel_boxes, show_progress="hidden")
+    for _c in r_card_in:
+        _c.change(r_cards, [r_sel] + r_card_in + [r_on], r_cards_html, show_progress="hidden")
+    r_source.change(r_source_changed, [r_source, r_saved, r_systems], [r_systems, r_vlm_set], show_progress="hidden")
+    r_saved.change(r_source_changed, [r_source, r_saved, r_systems], [r_systems, r_vlm_set], show_progress="hidden")
 
-    q_shown = [q_table, q_item, q_log, q_line]
-    q_start.click(queue_start, None, q_shown + [q_msg])
-    q_stop.click(queue_stop, None, q_shown + [q_msg])
-    q_stop_now.click(queue_stop_now, None, q_shown + [q_msg])
-    q_clear.click(queue_clear, None, q_shown + [q_msg])
-    q_refresh.click(queue_view, None, q_shown)
-    q_up.click(lambda i: queue_change(i, "up"), q_item, q_shown + [q_msg])
-    q_down.click(lambda i: queue_change(i, "down"), q_item, q_shown + [q_msg])
-    q_remove.click(lambda i: queue_change(i, "remove"), q_item, q_shown + [q_msg])
-    q_timer.tick(queue_tick, None, [q_table, q_log, q_line], show_progress="hidden")
-    sr_pick.change(run_show, sr_pick, [sr_facts, sr_table, sr_fig])
+    r_add_btn.click(r_add, [r_open, r_edit] + r_form, r_shown + [r_msg, r_edit, r_edit_md]).then(
+        lambda: gr.update(choices=r_groups()), None, r_group, show_progress="hidden")
+    r_now_btn.click(r_run_now, [r_open] + r_form, r_shown + [r_msg])
+    r_dup_btn.click(r_duplicate, None, r_fill_out + [r_msg])
+    r_cancel_btn.click(lambda: ("", ""), None, [r_edit, r_edit_md], show_progress="hidden")
+
+    r_all.click(r_start, r_open, r_shown + [r_msg])
+    r_stop_after_btn.click(r_stop_after, r_open, r_shown + [r_msg])
+    r_stop_now_btn.click(r_stop_now, r_open, r_shown + [r_msg])
+    r_clear_btn.click(r_clear, r_open, r_shown + [r_msg])
+    h_show = [sr_facts, sr_table, sr_fig]
+    r_board_html.click(r_board_click, [r_open, r_edit], r_shown + [r_msg, r_open, r_edit, r_edit_md, r_want] + r_fill_out,
+                       show_progress="hidden").then(r_open_result, [r_want, h_picked, h_armed, h_opened],
+                                                    [h_html, h_sig, h_opened] + h_show, show_progress="hidden")
+    h_html.click(r_history_click, [h_picked, h_armed, h_opened],
+                 [h_html, h_picked, h_armed, h_opened] + h_show + [h_cmp, h_cmp_settings, h_cmp_note, c_runs, h_msg, h_sig],
+                 show_progress="hidden")
+    h_pub_btn.click(r_publish_state, h_pub_name, h_msg)
+    r_timer.tick(r_tick, [r_open, r_sig, h_sig, h_picked, h_armed, h_opened], [r_board_html, r_line, r_sig, h_html, h_sig, status],
+                 show_progress="hidden")
 
     pages(3, pg_exp, [
         (tab_vision, "Vision systems", v_page, [v_data, v_ticks], [v_data, v_scope, v_ticks] + v_shown),
-        (tab_run, "One-button run", run_page, None, p_shown + [p_vlm_set, p_3d_set, p_fit_set]),
-        (tab_queue, "Queue", queue_view, None, q_shown),
-        (tab_runs, "Saved runs", runs_page, None, [p_runs, sr_pick]),
+        (tab_runs, "Runs", r_page, [r_open, h_picked, h_armed, h_opened, r_edit],
+         [r_board_html, r_line, r_sig, h_html, h_sig, r_source, r_saved, r_vlm_set, r_group, r_edit_md]),
     ])
-    # the timer of the Queue page ticks only while that page is the one shown
-    tab_queue.select(lambda: gr.Timer(active=True), None, q_timer, show_progress="hidden")
-    for _t in (tab_vision, tab_run, tab_runs):
-        _t.select(lambda: gr.Timer(active=False), None, q_timer, show_progress="hidden")
+    # the timer of the Runs page ticks only while that page is the one shown
+    tab_runs.select(lambda: gr.Timer(active=True), None, r_timer, show_progress="hidden")
+    tab_vision.select(lambda: gr.Timer(active=False), None, r_timer, show_progress="hidden")
     for _k in range(len(NAV)):
         if _k == 3:
-            nav_ev[_k] = nav_ev[_k].then(lambda page: gr.Timer(active=page == "Queue"), pg_exp, q_timer, show_progress="hidden")
+            nav_ev[_k] = nav_ev[_k].then(lambda page: gr.Timer(active=page == "Runs"), pg_exp, r_timer, show_progress="hidden")
         else:
-            nav_ev[_k] = nav_ev[_k].then(lambda: gr.Timer(active=False), None, q_timer, show_progress="hidden")
+            nav_ev[_k] = nav_ev[_k].then(lambda: gr.Timer(active=False), None, r_timer, show_progress="hidden")
 
     # ---------------------------------------------------------------------- Analysis → Results
     r_refresh.click(results_load, None, [r_table, r_fig, r_stem, r_msg])
@@ -2655,4 +3304,4 @@ def launch_options():
 
 
 if __name__ == "__main__":
-    demo.launch(theme=THEME, css=CSS, **launch_options())
+    demo.launch(theme=THEME, css=CSS, head=HEAD, **launch_options())
