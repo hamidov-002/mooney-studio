@@ -316,7 +316,7 @@ def run_vlm(project, model, prompt=VLM_PROMPT, source="Original", log=print, pro
     System 2 - vision-language model through Ollama. The same prompt for every original and every Mooney,
     temperature 0, seed 0. The raw answer goes to Result2/{Original,Mooney}/<stem>.txt, the parsed fields to
     analysis/result2_vlm.csv, model + prompt to analysis/result2_vlm_protocol.json.
-    Answers from an earlier run are reused only if model and prompt are unchanged.
+    Answers from an earlier run are reused only if model and prompt are unchanged and the image is not newer than the answer.
     identify=True also checks whether the model names the person (needs a prompt with a "person" key).
     only: a set of file stems; if given, the model runs on those photos only (it is heavy, so the subset may be enough).
     """
@@ -342,7 +342,8 @@ def run_vlm(project, model, prompt=VLM_PROMPT, source="Original", log=print, pro
         + ("" if same or not resume else " · model or prompt changed, earlier answers are not reused"))
     for k, (stem, cond, path) in enumerate(todo):
         out = os.path.join(d[cond], stem + ".txt")
-        if resume and same and os.path.exists(out) and os.path.getsize(out) > 0:
+        # an earlier answer is reused only if it is newer than the image it describes (a remade Mooney gets a fresh answer)
+        if resume and same and os.path.exists(out) and os.path.getsize(out) > 0 and os.path.getmtime(out) >= os.path.getmtime(path):
             text = open(out, encoding="utf-8").read(); reused += 1
         else:
             r = requests.post(OLLAMA + "/api/generate", timeout=600, json={
