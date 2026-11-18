@@ -1,0 +1,12 @@
+# Mooney Studio - Python 3.11 to 3.13. Install with:  ./setup.sh   (or: pip install -r requirements.txt)
+gradio>=6.0                     # the interface (the app passes theme and css to launch(), which needs version 6)
+numpy                           # arrays
+pillow>=10.0                    # reading and writing images
+scipy>=1.10                     # blur, triangulation, interpolation of the true depth
+opencv-python-headless>=4.8     # face detector (YuNet) and face embedding (SFace)
+onnxruntime>=1.16               # runs the depth model and the background separation
+rembg>=2.0.50                   # background separation (U2-Net)
+mediapipe>=0.10.9               # 478 face landmarks for the 3D faces and system 5
+matplotlib>=3.7                 # figures in Results, Analysis and 3D faces
+requests>=2.28                  # downloads: photos from Wikimedia Commons, model files, the Ollama server
+h5py>=3.8                       # only for the Basel source of 3D faces (reads the model file); everything else works without it

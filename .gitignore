@@ -1,0 +1,48 @@
+# Your data never belongs in the repository. By default it lives in the working folder outside this
+# folder (~/MooneyStudio); these lines catch it if you point the app at a folder in here.
+project/
+runs/
+notes/
+work/
+*-work/
+
+# local settings (hold your own folder paths)
+config.json
+
+# personal starters and scratch files
+run.command
+identities.txt
+_*/
+
+# model files are downloaded on first use
+models/
+*.onnx
+*.task
+
+# Basel Face Model: licensed per person, must never be committed or shared
+*.h5
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# macOS, editors
+.DS_Store
+.idea/
+.vscode/
+
+# stray images in the code folder (the two screenshots used by the README live in docs/)
+/*.png
+/*.jpg
+/*.jpeg
+docs/*.jpg
+docs/*.jpeg
+docs/*.png
+!docs/screenshot_overview.png
+!docs/screenshot_systems.png
+
+# other private documents that sometimes sit next to the code
+*.pptx
+*.zip

@@ -1,0 +1,31 @@
+{
+  "_how_to_use": "Copy this file to config.json and keep only the lines you want to change. Every setting and its meaning: python config.py",
+  "WORK_DIR": "~/MooneyStudio",
+  "TARGET_PHOTOS": 100,
+  "TARGET_SUBSET": 10,
+  "MOONEY_SIGMA": 6.0,
+  "MOONEY_WHITE": 23.0,
+  "MOONEY_BACKGROUND": "black",
+  "COLLECT_PER_PERSON": 2,
+  "OLLAMA_HOST": "http://127.0.0.1:11434",
+  "OLLAMA_MODEL": "llava:7b",
+  "VLM_SCOPE": "subset",
+  "LIGHTS_3D": [
+    "front",
+    "left 45°",
+    "right 45°",
+    "top",
+    "below"
+  ],
+  "PHOTOS_3D": 10,
+  "BASEL_MODEL": "models/model2019_fullHead.h5",
+  "BASEL_MODEL_FACE": "models/model2019_face12.h5",
+  "BASEL_FACES": 10,
+  "BASEL_SCALE": 0.9,
+  "BASEL_SHADOWS": true,
+  "HOST": "127.0.0.1",
+  "PORT": 0,
+  "SHARE": false,
+  "AUTH_USER": "",
+  "AUTH_PASSWORD": ""
+}
