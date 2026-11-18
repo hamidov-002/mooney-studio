@@ -228,6 +228,68 @@ def score_truth(project, source="Original", log=print, progress=None, sub=SUB):
 
 
 # ---------------------------------------------------------------------------- per render, per light
+# what system 2 may answer for the light, and the true light it stands for (back-light has no matching answer)
+VLM_LIGHT = {"front": "front", "left 45°": "left", "right 45°": "right", "top": "top", "below": "below"}
+VLM_MIRROR = {"left": "right", "right": "left"}
+VLM_POSE = {"frontal": "frontal", "turned 30° left": "turned left", "turned 30° right": "turned right"}
+VLM_HEADERS = ["Condition", "Images", "Says a face is present", "Light direction right", "Light right if left and right are swapped",
+               "Head pose right"]
+
+
+def score_vlm(project, log=print, sub=SUB):
+    """
+    System 2 against what we know about every render: the light direction we set and, for the Basel faces, the head pose.
+    Reads <sub>/analysis/result2_vlm.csv and truth/renders.csv, writes <sub>/analysis/vlm_truth.csv (one row per
+    answered image) and returns the rows. Nothing is computed by a model here; answers are only compared.
+      light_correct     the answer names the light we set (front, left, right, top, below); empty for back-light
+      light_mirrored    the answer is the opposite side (left for right): the model may mean the person's left
+      pose_correct      only where the pose was set by us (frontal, turned 30 degrees); empty otherwise
+    """
+    r = root(project, sub)
+    truth = {os.path.splitext(x["file"])[0]: x for x in renders(project, sub)}
+    out = []
+    for a in _rows(os.path.join(r, "analysis", "result2_vlm.csv")):
+        t = truth.get(a.get("file", ""))
+        if t is None:
+            continue
+        said_l, said_p = (a.get("light_direction") or "").strip().lower(), (a.get("head_pose") or "").strip().lower()
+        want_l, want_p = VLM_LIGHT.get(t.get("light", "")), VLM_POSE.get(t.get("head_pose", ""))
+        out.append({"file": a["file"], "condition": a.get("condition", ""), "source": os.path.splitext(t.get("source", ""))[0],
+                    "light": t.get("light", ""), "said_light": said_l,
+                    "light_correct": "" if want_l is None else int(said_l == want_l),
+                    "light_mirrored": "" if want_l not in VLM_MIRROR else int(said_l == VLM_MIRROR[want_l]),
+                    "head_pose": t.get("head_pose", ""), "said_pose": said_p,
+                    "pose_correct": "" if want_p is None else int(said_p == want_p),
+                    "face_present": int((a.get("face_present") or "").strip().lower() == "yes")})
+    if out:
+        with open(os.path.join(r, "analysis", "vlm_truth.csv"), "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(out[0])); w.writeheader(); w.writerows(out)
+        for row in vlm_table(project, sub)[1]:
+            log("  " + " · ".join(f"{h}: {v}" for h, v in zip(VLM_HEADERS, row)))
+        log(f"Written to {sub}/analysis/vlm_truth.csv.")
+    else:
+        log("System 2 has no answers for this 3D dataset yet.")
+    return out
+
+
+def _share(rows, key):
+    vals = [int(x[key]) for x in rows if str(x.get(key, "")) != ""]
+    return f"{sum(vals)} of {len(vals)} ({100 * sum(vals) / len(vals):.0f} %)" if vals else "–"
+
+
+def vlm_table(project, sub=SUB):
+    """(headers, rows): system 2 on the renders and on their Mooneys, compared with the light and pose we set."""
+    rows = _rows(os.path.join(root(project, sub), "analysis", "vlm_truth.csv"))
+    out = []
+    for cond, name in (("Original", "Render"), ("Mooney", "Mooney")):
+        sel = [x for x in rows if x.get("condition") == cond]
+        if sel:
+            out.append([name, len(sel), _share(sel, "face_present"), _share(sel, "light_correct"),
+                        _share([x for x in sel if str(x.get("light_mirrored", "")) != ""], "light_mirrored") if any(
+                            str(x.get("light_mirrored", "")) != "" for x in sel) else "–", _share(sel, "pose_correct")])
+    return VLM_HEADERS, out
+
+
 def _system_rows(folder):
     """What systems 1, 3 and 4 wrote for the images of one folder (a project or a 3D set), keyed by image stem."""
     face = {}

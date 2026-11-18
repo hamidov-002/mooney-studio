@@ -1123,9 +1123,31 @@ def d3_suggest(choice=SET_SUGGEST):
     return gr.update(choices=images_in("Original"), value=photo_set_files(choice))
 
 
-def d3_job(steps, sub, files, lights, basel, progress, systems=None):
+def d3_vlm_only(sub, vlm_set, log=None):
+    """
+    The renders system 2 runs on in a 3D dataset (it is heavy, so usually not all of them), as a set of file stems or
+    None for all. Faces made from photos follow the chosen photo set; invented faces take the first VLM_3D_FACES.
+    """
+    rows = a3.renders(PROJECT_ROOT, sub)
+    faces = list(dict.fromkeys(os.path.splitext(r["source"])[0] for r in rows))
+    if a3.has_photos(sub):
+        want = photo_set_stems(vlm_set or vlm_scope_label())
+        chosen = faces if want is None else [f for f in faces if f in set(want)]
+        if not chosen and faces:                         # the set shares no photo with this 3D dataset
+            chosen = faces[:max(int(cfg.VLM_3D_FACES), 1)] if int(cfg.VLM_3D_FACES) else faces
+            if log: log(f"The set “{vlm_set}” has no photo in this 3D dataset; taking the first {len(chosen)} faces.")
+    else:
+        chosen = faces[:int(cfg.VLM_3D_FACES)] if int(cfg.VLM_3D_FACES) else faces
+    if len(chosen) == len(faces):
+        return None
+    keep = set(chosen)
+    return {os.path.splitext(r["file"])[0] for r in rows if os.path.splitext(r["source"])[0] in keep}
+
+
+def d3_job(steps, sub, files, lights, basel, progress, systems=None, vlm_set=None):
     """The chosen steps of the 3D chain as one job for run_logged. Each step checks that the one before it was done.
-    systems: which of 1, 3 and 4 the step "systems" runs (None = all three)."""
+    systems: which of 1, 2, 3 and 4 the step "systems" runs (None = 1, 3 and 4). System 2 is compared with the light
+    and pose we set; vlm_set is the photo set it follows on faces made from photos."""
     def job(log):
         root = P(sub)
         for k, step in enumerate(steps):
@@ -1171,15 +1193,31 @@ def d3_job(steps, sub, files, lights, basel, progress, systems=None):
                 if not d3_gallery("Mooney", sub):
                     log("No Mooneys of the renders yet - make them in Dataset → 3D datasets first."); return
                 which = [n for n in (1, 3, 4) if systems is None or n in systems]
-                if not which:
-                    log("Tick at least one of the systems 1, 3 and 4."); return
+                vlm = systems is not None and 2 in systems
+                if not which and not vlm:
+                    log("Tick at least one system."); return
+                span = 0.5 if vlm and which else 1.0             # system 2 gets the second half of the bar when both run
                 parts = {1: (vs.run_face, 0.0, 0.2), 3: (vs.run_depth, 0.2, 0.4), 4: (vs.run_shading, 0.6, 0.3)}
                 for i, n in enumerate(which):
                     fn, start, share = parts[n]
                     if i:
                         log("")
-                    fn(root, "Original", log=log, progress=lambda p, start=start, share=share: prog(start + share * p))
-                log(""); a3.score_truth(PROJECT_ROOT, log=log, progress=lambda p: prog(0.9 + 0.1 * p), sub=sub)
+                    fn(root, "Original", log=log, progress=lambda p, start=start, share=share: prog(span * (start + share * p)))
+                if which:
+                    log(""); a3.score_truth(PROJECT_ROOT, log=log, progress=lambda p: prog(span * (0.9 + 0.1 * p)), sub=sub)
+                if vlm:
+                    if which:
+                        log("")
+                    model = pick_model(vs.status()["vlm_models"])
+                    if not model:
+                        log("System 2 skipped: Ollama is not running or has no vision model (Experiments → Vision systems → settings).")
+                    else:
+                        only = d3_vlm_only(sub, vlm_set, log)
+                        log("System 2 on " + ("every render" if only is None else f"{len(only)} renders") + " and their Mooneys.")
+                        vs.run_vlm(root, model, source="Original", log=log, only=only,
+                                   progress=lambda p: prog((span if which else 0.0) + (1 - (span if which else 0.0)) * 0.98 * p))
+                        log(""); log("System 2 against the light and pose we set:")
+                        a3.score_vlm(PROJECT_ROOT, log=log, sub=sub)
     return job
 
 
@@ -1464,7 +1502,8 @@ def run_steps(c, saved):
                 vs.run_vlm(PROJECT_ROOT, model, source="Original", log=log, progress=prog, only=None if only is None else set(only))
             steps.append((3, step_vlm))
     elif c["systems"]:
-        steps.append((6, lambda log, prog: d3_job(["systems"], sub, [], [], {}, lambda v, desc=None: prog(v), systems=c["systems"])(log)))
+        steps.append((6, lambda log, prog: d3_job(["systems"], sub, [], [], {}, lambda v, desc=None: prog(v), systems=c["systems"],
+                                                  vlm_set=c.get("vlm_set"))(log)))
     if c["export"]:
         def step_export(log, prog):
             if photos:
@@ -1673,9 +1712,9 @@ def r_source_changed(source, saved_set, systems):
         j = next((x for x in d3_set_list() if x["folder"] == saved_set), None)
         src = j.get("sub", src) if j else src
     photos = src == R_PHOTOS
-    choices = [R_SYS[n] for n in ((1, 2, 3, 4) if photos else (1, 3, 4))]
-    value = [s for s in (systems or []) if s in choices] or [R_SYS[n] for n in (1, 3, 4)]
-    return gr.update(choices=choices, value=value), gr.update(visible=photos)
+    choices = [R_SYS[n] for n in (1, 2, 3, 4)]
+    value = [s for s in (systems or []) if s in choices and (photos or R_SYS_KEY[s] != 2)] or [R_SYS[n] for n in (1, 3, 4)]
+    return gr.update(choices=choices, value=value), gr.update(visible=True)
 
 
 R_FORM_N = 20                # how many values r_fill returns: 15 fields and pictures, 5 panels
@@ -1686,7 +1725,7 @@ def r_fill(c, sel="source"):
     on = {"mooneys": bool(c["mooneys"]), "systems": bool(c["systems"]), "export": bool(c["export"]), "save": bool(c["save"])}
     source = R_SOURCES.get(c["source"], R_SOURCES[R_PHOTOS])
     photos = c["source"] == R_PHOTOS
-    sys_choices = [R_SYS[n] for n in ((1, 2, 3, 4) if photos else (1, 3, 4))]
+    sys_choices = [R_SYS[n] for n in (1, 2, 3, 4)]
     systems = [R_SYS[n] for n in c["systems"] if R_SYS[n] in sys_choices] or [R_SYS[n] for n in (1, 3, 4)]
     saved_set = c.get("saved_set") or R_NO_SET
     vlm_set = c.get("vlm_set") if c.get("vlm_set") in photo_set_choices() else vlm_scope_label()
@@ -1978,7 +2017,8 @@ def run_show(folder):
 # ============================================================================ Vision systems on any dataset
 V_PHOTOS = "Photos"
 V_SYSTEMS = ["1 Face model", "2 Vision-language model", "3 Learned depth", "4 Depth from shading", "5 3D face mesh (optional)"]
-V_3D = [V_SYSTEMS[0], V_SYSTEMS[2], V_SYSTEMS[3]]
+V_3D = [V_SYSTEMS[0], V_SYSTEMS[1], V_SYSTEMS[2], V_SYSTEMS[3]]      # what can run on a 3D dataset
+V_3D_DEFAULT = [V_SYSTEMS[0], V_SYSTEMS[2], V_SYSTEMS[3]]            # ticked at first (system 2 is slow)
 
 
 def v_datasets():
@@ -1991,7 +2031,10 @@ def v_results(dataset):
     if dataset in D3_SOURCES:
         sub = D3_SOURCES[dataset]
         head, rows = a3.light_table(PROJECT_ROOT, sub)
-        return (f"`{sub}/`: {d3_line(sub)}. The table is by light direction, against the true depth.",
+        vh, vr = a3.vlm_table(PROJECT_ROOT, sub)
+        vlm = ("\n\n**System 2 against the light and pose we set** (`" + sub + "/analysis/vlm_truth.csv`)\n\n| " + " | ".join(vh) + " |\n|"
+               + "---|" * len(vh) + "\n" + "\n".join("| " + " | ".join(str(c) for c in r) + " |" for r in vr)) if vr else ""
+        return (f"`{sub}/`: {d3_line(sub)}. The table is by light direction, against the true depth." + vlm,
                 gr.update(value=rows or None, headers=head, label="One row per light direction"),
                 a3.fig_truth(PROJECT_ROOT, sub) if rows else None)
     rows = rs.summary(PROJECT_ROOT)
@@ -2004,9 +2047,9 @@ def v_results(dataset):
 def v_switch(dataset, ticks):
     """Another dataset was chosen: offer the systems that can run on it and show its results."""
     if dataset in D3_SOURCES:
-        choices, value = V_3D, [t for t in (ticks or []) if t in V_3D] or V_3D
+        choices, value = V_3D, [t for t in (ticks or []) if t in V_3D] or V_3D_DEFAULT
     else:
-        choices, value = V_SYSTEMS, [t for t in (ticks or []) if t in V_SYSTEMS] or V_3D
+        choices, value = V_SYSTEMS, [t for t in (ticks or []) if t in V_SYSTEMS] or V_3D_DEFAULT
     return (gr.update(choices=choices, value=value),) + v_results(dataset)
 
 
@@ -2027,7 +2070,7 @@ def vision_run(dataset, ticks, source, identify, model, prompt, scope, progress=
         return
     if dataset in D3_SOURCES:
         nums = [int(t[0]) for t in ticks if t in V_3D]
-        job = d3_job(["systems"], D3_SOURCES[dataset], None, None, {}, progress, systems=nums)
+        job = d3_job(["systems"], D3_SOURCES[dataset], None, None, {}, progress, systems=nums, vlm_set=scope)
         yield from run_logged(job, 4, final, what="the vision systems")
         return
     if not images_in("Mooney"):
@@ -2767,12 +2810,12 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                     "`analysis/`. A 3D dataset appears here once it has Mooneys.", elem_classes="lead")
                         with gr.Row():
                             v_data = gr.Radio(v_datasets(), value=V_PHOTOS, label="Run on", scale=2)
-                            v_ticks = gr.CheckboxGroup(V_SYSTEMS, value=V_3D, label="Systems to run", scale=3)
+                            v_ticks = gr.CheckboxGroup(V_SYSTEMS, value=V_3D_DEFAULT, label="Systems to run", scale=3)
                         gr.Markdown("**1** YuNet detector and SFace embedding: is a face found, and how similar is the Mooney to its original? · "
                                     "**2** a local vision-language model through Ollama: face present, head pose, light direction, description · "
                                     "**3** Depth Anything V2: a learned depth map · **4** shape from shading (Tsai & Shah 1994): depth from a "
-                                    "formula · **5** MediaPipe face mesh. On a 3D dataset, systems 1, 3 and 4 run and the depth maps are "
-                                    "compared with the true depth. Every value is explained in **Docs → Vision systems**.", elem_classes="hint")
+                                    "formula · **5** MediaPipe face mesh. On a 3D dataset the depth maps of 3 and 4 are compared with the true "
+                                    "depth, and the answers of system 2 with the light and pose we set (it runs on part of the faces; see its setting). Every value is explained in **Docs → Vision systems**.", elem_classes="hint")
                         with gr.Row():
                             v_go = gr.Button("Run the ticked systems", variant="primary", scale=6)
                             v_stop = gr.Button("Stop", variant="stop", scale=1, min_width=80)
@@ -2848,7 +2891,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                                     info="A 3D source is offered once it has renders (Dataset → 3D datasets).")
                                 r_saved = gr.Dropdown([R_NO_SET] + [f for _l, f in d3_set_choices()], value=R_NO_SET, scale=2,
                                                       label="Or a saved 3D dataset (loaded as the live one first)")
-                                r_vlm_set = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=2)
+                                r_vlm_set = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=2,
+                                                        info="For a 3D source: the faces made from these photos. Invented Basel faces: the first 10.")
                         with gr.Group(visible=False, elem_classes="stage-panel") as r_p_mooneys:
                             with gr.Row():
                                 r_sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (px)")

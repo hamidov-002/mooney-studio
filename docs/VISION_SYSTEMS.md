@@ -259,3 +259,18 @@ in `3D_basel_fit/analysis/truth_scores.csv`.
 
 Only image pairs that have a Mooney are counted, and every cell states its n. Nothing is recomputed from the
 images, so the comparison always shows what the last run of each set produced.
+
+### System 2 on a 3D dataset
+
+System 2 can run on renders and their Mooneys too. There we know what the right answer is, because we set it:
+
+| Value in `<3D folder>/analysis/vlm_truth.csv` | How | Reading |
+|---|---|---|
+| `light_correct` | the model's `light_direction` equals the light we set (front, left, right, top, below) | empty for the back-light, which has no matching answer |
+| `light_mirrored` | the answer is the opposite side (left for right) | the model may mean the person's left, not the picture's |
+| `pose_correct` | the model's `head_pose` equals the pose we set | only for Basel faces rendered frontal or turned 30°; empty otherwise |
+| `face_present` | the model says a face is present | – |
+
+Left and right are as seen in the picture. The model is slow, so it runs on part of a 3D dataset: for faces made
+from photos, on the faces of the photo set chosen for system 2; for invented faces, on the first 10
+(`VLM_3D_FACES` in the settings).

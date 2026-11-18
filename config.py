@@ -63,6 +63,7 @@ SETTINGS = {
     "OLLAMA_HOST": ("http://127.0.0.1:11434", "where the Ollama server listens"),
     "OLLAMA_MODEL": ("llava:7b", "vision-language model suggested when several are installed"),
     "VLM_SCOPE": ("subset", "language model runs on: subset (the ten pairs or the favourites) or all"),
+    "VLM_3D_FACES": (10, "on invented Basel faces the language model runs on the first this many faces (0 = all)"),
 
     # ---- 3D faces
     "LIGHTS_3D": (["front", "left 45°", "right 45°", "top", "below"], "light directions rendered for every 3D face"),
