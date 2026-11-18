@@ -2,10 +2,11 @@
 Analysis of the 3D step: renders of 3D faces under known lights, their Mooneys, and what the vision systems
 return for both, compared with what is known exactly for every render.
 
-There are two sources of 3D faces, each in its own folder inside the project:
+There are three sources of 3D faces, each in its own folder inside the project:
 
-    3D/         faces reconstructed from your photos (face3d.run_render_set)
-    3D_basel/   invented faces from the Basel Face Model (bfm.run_render_set)
+    3D/             faces reconstructed from your photos (face3d.run_render_set)
+    3D_basel_fit/   the Basel Face Model fitted to your photos' landmarks (bfm_fit.run_fit_set)
+    3D_basel/       invented faces from the Basel Face Model (bfm.run_render_set)
 
 Both folders have the same layout as the project (Original/, Mooney/, Result1..4/, analysis/, figures/) plus
 truth/. The render step fills Original/ and truth/, Batch fills Mooney/, and systems 1, 3 and 4 run on the
@@ -19,14 +20,15 @@ folder unchanged. Every function below takes `sub`, the folder name; the default
     person_sheet(project, s)  render and Mooney of one face under every light
     export(project)           all of the above to <sub>/figures/
 
-    compare_sets(project)     the three stimulus sets side by side: photos, reconstructed 3D, Basel 3D
-    compare_lights(project)   the two 3D sets by light direction
+    compare_sets(project)     the stimulus sets side by side: photos, reconstructed 3D, Basel fitted 3D, Basel 3D
+    compare_lights(project)   the 3D sets by light direction
     fig_compare(project)      one chart of the comparison
     export_compare(project)   the comparison to <project>/figures/
 
 What "truth" means: the depth and the light are exact for the RENDER, because the picture is drawn from that
 mesh under that light. In 3D/ the mesh is an estimate from one photo, so nothing there is the true shape of the
-real person. In 3D_basel/ the face is invented, so shape, light and pose are all set by us and exact.
+real person; the same holds in 3D_basel_fit/, where the Basel model is fitted to the photo's landmarks. In
+3D_basel/ the face is invented, so shape, light and pose are all set by us and exact.
 
 No interface code in this file.
 """
@@ -38,12 +40,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 import analysis as an
+import bfm_fit
 import bfm
 import config as cfg
 import face3d as f3
 
 SUB = f3.SUB                 # faces reconstructed from photos
 BASEL = bfm.SUB              # invented faces from the Basel Face Model
+FIT = bfm_fit.SUB            # the Basel Face Model fitted to photos
 TURNED = 0.6                 # |head turn| in dataset.csv above which a photo is not suggested (mesh tends to break)
 SCORE_FIELDS = ["file", "source", "identity", "light", "mask_pixels", "similarity_render_to_photo",
                 "depth3_vs_truth_render", "depth3_vs_truth_mooney", "depth4_vs_truth_render", "depth4_vs_truth_mooney"]
@@ -58,8 +62,8 @@ def root(project, sub=SUB):
 
 
 def has_photos(sub):
-    """Only the reconstructed faces come from photos; the Basel faces are invented."""
-    return sub == SUB
+    """The reconstructed and the fitted faces come from photos; the invented Basel faces do not."""
+    return sub in (SUB, FIT)
 
 
 def headers(sub=SUB):
@@ -164,7 +168,8 @@ def score_truth(project, source="Original", log=print, progress=None, sub=SUB):
     depthN_vs_truth_*   Pearson correlation, inside the face mask, between the system's depth picture
                         (Result3 / Result4, the saved PNG) and the true depth of the render. 1 = the same relief.
     similarity_render_to_photo   SFace similarity between the render and the photo it was made from. Both are
-                        aligned with the landmarks found in the PHOTO (the render has the same geometry).
+                        aligned with the landmarks found in the PHOTO (the render has the same geometry);
+                        for the fitted set, the render is aligned with its own landmarks.
                         Left empty for the Basel set: its faces are invented, there is no photo.
     """
     rs = renders(project, sub)
@@ -195,7 +200,10 @@ def score_truth(project, source="Original", log=print, progress=None, sub=SUB):
         if fr is not None and photo_emb[src][1] is not None:
             row, emb = photo_emb[src]
             render = Image.open(os.path.join(root(project, sub), "Original", r["file"])).convert("RGB")
-            rec["similarity_render_to_photo"] = round(float(np.dot(emb, fr.embed(render, row))), 3)
+            if sub == FIT:                       # the fitted head is drawn in its own frame, so it is aligned with its own landmarks
+                row = fr.detect(render)
+            if row is not None:
+                rec["similarity_render_to_photo"] = round(float(np.dot(emb, fr.embed(render, row))), 3)
         for n in (3, 4):
             for cond, key in (("Original", "render"), ("Mooney", "mooney")):
                 z = _depth_png(project, n, cond, stem, depth.shape, sub) if have[n] else None
@@ -401,11 +409,16 @@ CAVEAT_BASEL = ("These faces are invented: each is a random sample from the Base
                 "shape and skin colour, and shows no real person. Shape, light and head pose are set by us, so the true depth "
                 "is exact, and cast shadows (the nose shading the cheek) are drawn. The heads have no hair. The model file is "
                 "not part of Mooney Studio.")
-SET_NAMES = {None: "Photos", SUB: "Reconstructed 3D", BASEL: "Basel 3D"}
+CAVEAT_FIT = ("The Basel Face Model is fitted to the landmarks of each photo (eyes, nose, mouth, chin), so the head has that "
+              "person's overall proportions and head pose, but it stays close to the model's average face: landmarks do not fix "
+              "fine detail, and the skin has one colour matched to the photo. The true depth and the light are exact for the "
+              "render, an estimate for the person. Cast shadows are drawn; the heads have no hair. Check each fit in "
+              "`truth/<photo>__fit.png`. The model file is not part of Mooney Studio.")
+SET_NAMES = {None: "Photos", SUB: "Reconstructed 3D", FIT: "Basel fitted 3D", BASEL: "Basel 3D"}
 
 
 def caveat(sub=SUB):
-    return CAVEAT if has_photos(sub) else CAVEAT_BASEL
+    return CAVEAT_FIT if sub == FIT else CAVEAT if has_photos(sub) else CAVEAT_BASEL
 
 
 def export(project, sub=SUB):
@@ -433,7 +446,8 @@ def export(project, sub=SUB):
 
 
 # ---------------------------------------------------------------------------- compare the stimulus sets
-SETS = [None, SUB, BASEL]                # None = the photos of the main project
+SETS = [None, SUB, FIT, BASEL]           # None = the photos of the main project
+SETS_3D = [SUB, FIT, BASEL]
 NO_TRUTH = "no truth"
 # (label, key, kind); kind: n, count, mean, truth (a mean that exists only where the truth is known)
 MEASURES = [
@@ -503,12 +517,12 @@ LIGHT_HEADERS = ["Light", "Set", "n"] + [h for h in HEADERS[2:] if h != "Similar
 
 
 def compare_lights(project):
-    """(headers, rows): for every light direction one row per 3D set, so the two sets stand directly under each other."""
-    recs = {sub: per_render(project, sub) for sub in (SUB, BASEL)}
+    """(headers, rows): for every light direction one row per 3D set, so the sets stand directly under each other."""
+    recs = {sub: per_render(project, sub) for sub in SETS_3D}
     present = {r["light"] for rows in recs.values() for r in rows}
     table = []
     for light in [l for l in f3.LIGHTS if l in present] + (["all lights"] if present else []):
-        for sub in (SUB, BASEL):
+        for sub in SETS_3D:
             sel = [r for r in recs[sub] if light == "all lights" or r["light"] == light]
             if sel:
                 table.append([light, SET_NAMES[sub], len(sel), _count(sel, "det_render"), _count(sel, "det_mooney"), _count(sel, "det_reblur"),

@@ -508,7 +508,7 @@ def export(project, by):
 # ============================================================================ saved runs
 CURRENT = "current"
 RUN_PARTS = ["Mooney", "Result1", "Result2", "Result3", "Result4", "Result5", "analysis", "figures", "Subset", "Subsets",
-             "3D", "3D_basel"]                                                             # folders copied into a run
+             "3D", "3D_basel_fit", "3D_basel"]                                                             # folders copied into a run
 RUN_FILES = ["params.csv", "settings.json", "favorites.json", "subsets.json", "dataset.csv"]              # files copied into a run
 # What a run can hold, in the order shown in the app: key -> (label, folders). The Mooneys and RUN_FILES are always kept.
 RUN_GROUPS = {
@@ -516,10 +516,11 @@ RUN_GROUPS = {
     "figures": ("Exported figures", ["figures"]),
     "subset": ("Subset", ["Subset", "Subsets"]),
     "3d": ("3D faces from photos", ["3D"]),
+    "fit": ("3D faces fitted with the Basel Face Model", ["3D_basel_fit"]),
     "basel": ("3D faces from the Basel Face Model", ["3D_basel"]),
     "photos": ("Original photos", ["Original"]),
 }
-RUN_DEFAULT = ["results", "figures", "subset", "3d", "basel"]                              # everything except the photos
+RUN_DEFAULT = ["results", "figures", "subset", "3d", "fit", "basel"]                              # everything except the photos
 
 
 def _count(folder):

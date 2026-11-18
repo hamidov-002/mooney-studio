@@ -229,7 +229,24 @@ Our settings for these renders: parallel projection, 512 px, ambient light 0.1, 
 depth in mm relative to its mean over the head. The identity of a Basel face is `basel-<seed>`; turned views of
 the same seed share it.
 
-### Comparing the three stimulus sets
+### The fitted Basel set (`3D_basel_fit/`)
+
+The third source: the Basel Face Model fitted to the landmarks of a photo (`bfm_fit.py`), then drawn like the
+invented faces. Systems 1, 3 and 4 run on it unchanged, and the depth against the truth is calculated as above,
+in `3D_basel_fit/analysis/truth_scores.csv`.
+
+| | Fitted Basel faces (`3D_basel_fit/`) |
+|---|---|
+| Shape | the model's mean plus 80 fitted shape components; fitted to 19 MediaPipe landmarks with an expected error of 1.5 mm |
+| True depth | exact for the render, an estimate for the person (landmarks fix proportions, not fine detail) |
+| Light | set by us |
+| Head pose | frontal by default; *as in the photo* uses the pose found by the fit |
+| Cast shadows | drawn (can be switched off) |
+| Surface | the model's mean skin colour times one RGB gain matched to the photo |
+| `similarity_render_to_photo` | calculated; the render is aligned with its own landmarks, because it is drawn in its own frame |
+| Stored per fit | `fit_error_px` (mean landmark error), `fit_error_eyes` (as a share of the eye distance), `tone_gain`, the coefficients file |
+
+### Comparing the stimulus sets
 
 *Compare stimulus sets* in the 3D tab reads, for the photos and for each 3D set, the tables the systems wrote:
 

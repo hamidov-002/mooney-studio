@@ -74,6 +74,10 @@ SETTINGS = {
     "BASEL_FACES": (10, "how many invented faces are drawn (seeds 1, 2, 3, ...)"),
     "BASEL_SCALE": (0.9, "coefficient scale: 0 = the mean face, 1 = the model's full variation"),
     "BASEL_SHADOWS": (True, "draw cast shadows (the nose shading the cheek)"),
+    "BASEL_FIT_COMPONENTS": (80, "fitting the Basel model to a photo: how many shape components are fitted"),
+    "BASEL_FIT_SIGMA_MM": (1.5, "fitting: expected landmark error in mm; larger = the face stays nearer the mean"),
+    "BASEL_FIT_MAX_ERROR": (0.15, "fitting: a photo is skipped if the landmark error exceeds this share of the eye distance"),
+    "BASEL_FIT_TONE": (True, "fitting: match the overall skin tone of the photo (one colour gain, no texture)"),
 
     # ---- serving
     "HOST": ("127.0.0.1", "address the app listens on; 0.0.0.0 makes it reachable from other machines"),

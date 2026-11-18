@@ -18,6 +18,7 @@ The heavy lifting lives in the other modules; this file only builds the interfac
     results.py        summary, figure, panels                   face3d.py   3D faces reconstructed from photos
     analysis.py       per-photo analysis: groups, agreement, ranking, figures
     analysis3d.py     3D faces against the truth, comparison of sets    bfm.py      invented 3D faces (Basel Face Model)
+    bfm_fit.py        the Basel Face Model fitted to photo landmarks
 """
 import argparse
 import csv
@@ -56,6 +57,7 @@ import analysis as an
 import analysis3d as a3
 import batch as bt
 import bfm
+import bfm_fit
 import collect_faces as cf
 import config as cfg
 import face3d as f3
@@ -201,6 +203,7 @@ def overview_md():
         f"| Results | {word(s['figures'] > 0)} | {s['figures']} per-photo panels exported to figures/ |",
         f"| Subset of {subset_target()} | {word(s['subset'] >= subset_target(), s['subset'] > 0)} | {s['subset']} pairs in Subset/ |",
         f"| 3D faces from photos | {d3_word()} | {d3_line()} |",
+        f"| 3D faces: Basel model fitted to photos | {d3_word(bfm_fit.SUB)} | {d3_line(bfm_fit.SUB)} |",
         f"| 3D faces from the Basel Face Model | {d3_word(bfm.SUB)} | {d3_line(bfm.SUB)} |",
         "",
         "### Current generation settings",
@@ -882,16 +885,25 @@ def runs_compare(names):
 
 
 # ============================================================================ 3D faces
-D3_SOURCES = {"Faces reconstructed from your photos": f3.SUB, "Invented faces from the Basel Face Model": bfm.SUB}
+D3_SOURCES = {"Faces reconstructed from your photos": f3.SUB, "Basel Face Model fitted to your photos": bfm_fit.SUB,
+              "Invented faces from the Basel Face Model": bfm.SUB}
 D3_LEAD = {
     f3.SUB: "For a few photos a 3D face mesh is estimated and drawn again under light directions we choose.",
+    bfm_fit.SUB: "The fitted heads are drawn under the lights chosen below.",
     bfm.SUB: "The faces are drawn in the head poses and under the light directions chosen below.",
 }
+FIT_POSES = list(bfm_fit.POSES)
+
+
+def fit_default_set():
+    """The photos the fitted source starts with: the project's subset, else the favourites."""
+    d = load_subsets()
+    return SET_PREFIX + d["active"] if d["active"] in d["sets"] else SET_FAVS
 BASEL_MODELS = {"Whole head": cfg.BASEL_MODEL, "Face only": cfg.BASEL_MODEL_FACE}
 
 
 def d3_sub(source):
-    """Folder of the chosen source of 3D faces (3D or 3D_basel)."""
+    """Folder of the chosen source of 3D faces (3D, 3D_basel_fit or 3D_basel)."""
     return D3_SOURCES.get(source, f3.SUB)
 
 
@@ -950,10 +962,14 @@ def d3_results(source, person=None):
 def d3_switch(source, which):
     """The source of 3D faces was changed: show its controls, its explanation and its results."""
     sub = d3_sub(source)
-    basel = sub == bfm.SUB
-    return (gr.update(visible=not basel), gr.update(visible=basel), D3_LEAD[sub] + " " + a3.caveat(sub)
-            + ("" if basel else " Strongly turned heads are skipped, because this simple mesh breaks for them."),
-            basel_note(which), gr.update(value=f"Export to {sub}/figures/")) + d3_results(source)
+    basel, fitted = sub == bfm.SUB, sub == bfm_fit.SUB
+    photo_set = fit_default_set() if fitted else SET_SUGGEST
+    return (gr.update(visible=not basel), gr.update(visible=basel or fitted), D3_LEAD[sub] + " " + a3.caveat(sub)
+            + (" Strongly turned heads are skipped, because this simple mesh breaks for them." if sub == f3.SUB else ""),
+            basel_note(which), gr.update(value=f"Export to {sub}/figures/"),
+            gr.update(visible=basel), gr.update(visible=basel), gr.update(visible=fitted),
+            gr.update(choices=photo_set_choices(suggest=True), value=photo_set),
+            gr.update(choices=images_in("Original"), value=photo_set_files(photo_set))) + d3_results(source)
 
 
 def d3_suggest(choice=SET_SUGGEST):
@@ -970,7 +986,16 @@ def d3_job(steps, sub, files, lights, basel, progress):
                     log("")
                 log(f"Step {k + 1} of {len(steps)}: {step}")
             prog = lambda p, k=k, step=step: progress((k + p) / len(steps), desc=step)
-            if step == "render" and sub == bfm.SUB:
+            if step == "render" and sub == bfm_fit.SUB:
+                if not files or not lights:
+                    log("Choose at least one photo and one light direction."); return
+                who = {os.path.splitext(r.get("file", ""))[0]: r.get("identity", "") for r in read_csv("dataset.csv")}
+                made = bfm_fit.run_fit_set(PROJECT_ROOT, list(files), lights, pose=basel.get("fit_pose", "frontal"),
+                                           model_path=BASEL_MODELS.get(basel["model"], cfg.BASEL_MODEL), shadows=bool(basel["shadows"]),
+                                           identities=who, log=log, progress=prog)
+                if not made:
+                    return                                          # the reason is in the log
+            elif step == "render" and sub == bfm.SUB:
                 if not lights or not basel["poses"]:
                     log("Choose at least one light direction and one head pose."); return
                 made = bfm.run_render_set(PROJECT_ROOT, range(1, int(basel["faces"]) + 1), lights, basel["poses"],
@@ -1005,9 +1030,9 @@ def d3_job(steps, sub, files, lights, basel, progress):
 
 
 def d3_run(steps):
-    def handler(source, files, lights, person, n_faces, model, poses, shadows, progress=gr.Progress()):
+    def handler(source, files, lights, person, n_faces, model, poses, shadows, fit_pose="frontal", progress=gr.Progress()):
         init_project()
-        basel = {"faces": n_faces or cfg.BASEL_FACES, "model": model, "poses": poses or [], "shadows": shadows}
+        basel = {"faces": n_faces or cfg.BASEL_FACES, "model": model, "poses": poses or [], "shadows": shadows, "fit_pose": fit_pose}
         yield from run_logged(d3_job(steps, d3_sub(source), files, lights, basel, progress), 7, lambda: d3_results(source, person))
     return handler
 
@@ -1036,7 +1061,8 @@ def d3_compare_export():
 PIPE_SYSTEMS = ["1 Face model", "2 Vision-language model (chosen set only, needs Ollama)", "3 Learned depth", "4 Depth from shading"]
 RUNS_COLS = ["Name", "Saved", "Mooneys", "By hand", "Blur", "White", "Background", "Systems", "Also holds", "Note"]
 RUNS_WIDTHS = ["14%", "12%", "9%", "7%", "6%", "7%", "10%", "8%", "14%", "13%"]
-RUNS_SHORT = {"figures": "figures", "Subset": "subset", "3D": "3D from photos", "3D_basel": "3D Basel", "Original": "photos"}
+RUNS_SHORT = {"figures": "figures", "Subset": "subset", "3D": "3D from photos", "3D_basel_fit": "3D Basel fitted", "3D_basel": "3D Basel",
+              "Original": "photos"}
 
 
 def runs_table():
@@ -1067,7 +1093,7 @@ def pipeline_view(msg=""):
 
 
 def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
-             vlm_set=None, d3_set=SET_SUGGEST, progress=gr.Progress()):
+             vlm_set=None, d3_set=SET_SUGGEST, d3_fit_set=None, progress=gr.Progress()):
     """
     One full run: Mooneys, vision systems, 3D faces, figures, saved copy - each part only if it is ticked.
     Nothing here computes anything itself; every step calls the same function as its own tab.
@@ -1115,18 +1141,19 @@ def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, system
     for label in d3:
         def step_3d(log, prog, label=label):
             basel = {"faces": int(n_faces or cfg.BASEL_FACES), "model": "Whole head", "poses": ["frontal"], "shadows": cfg.BASEL_SHADOWS}
-            if D3_SOURCES[label] == f3.SUB:
-                log(f"Photos: {d3_set} ({len(photo_set_files(d3_set))})")
-            d3_job(["render", "Mooneys", "systems"], D3_SOURCES[label], photo_set_files(d3_set),
+            which = (d3_fit_set or fit_default_set()) if D3_SOURCES[label] == bfm_fit.SUB else d3_set
+            if D3_SOURCES[label] != bfm.SUB:
+                log(f"Photos: {which} ({len(photo_set_files(which))})")
+            d3_job(["render", "Mooneys", "systems"], D3_SOURCES[label], photo_set_files(which),
                    [l for l in cfg.LIGHTS_3D if l in f3.LIGHTS], basel, lambda v, desc=None: prog(v))(log)
-        steps.append((f"3D faces: {label[0].lower() + label[1:]}", 4, step_3d))
+        steps.append((f"3D faces: {label}", 4, step_3d))
     if do_export:
         def step_export(log, prog):
             favs = load_favs()
             made = rs.export(PROJECT_ROOT, favs or rs.stems(PROJECT_ROOT)[:10])
             log(f"figures/: {len(made)} files (summary table, figure, one panel each for "
                 + ("your favourites" if favs else "the first 10 photos") + ").")
-            for s in (f3.SUB, bfm.SUB):
+            for s in (f3.SUB, bfm_fit.SUB, bfm.SUB):
                 if d3_gallery("Mooney", s):
                     log(f"{s}/figures/: {len(a3.export(PROJECT_ROOT, s))} files.")
             made = a3.export_compare(PROJECT_ROOT)
@@ -1328,13 +1355,15 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                 p_faces = gr.Slider(2, 30, value=cfg.BASEL_FACES, step=1, label="Basel faces", scale=1)
             with gr.Row():
                 p_vlm_set = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=1)
-                p_3d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="3D from photos uses", scale=1)
+                p_3d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="Reconstructed 3D uses", scale=1)
+                p_fit_set = gr.Dropdown(photo_set_choices(), value=fit_default_set(), label="Basel fitted 3D uses", scale=1)
             with gr.Row():
                 p_export = gr.Checkbox(True, label="Step 4 · Export figures", scale=1)
                 p_save = gr.Checkbox(True, label="Step 5 · Save the run under its name", scale=1)
                 p_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
                                           label="The saved run includes, besides the Mooneys and their values", scale=3)
-            gr.Markdown("3D from photos uses the chosen photos and the five default lights; Basel faces are whole heads, frontal, "
+            gr.Markdown("The two photo-based 3D sources use the chosen photos and the five default lights; the fitted heads are drawn "
+                        "frontal with cast shadows. Invented Basel faces are whole heads, frontal, "
                         "with cast shadows. For other choices use the **3D faces** tab. Other Batch options (white rule, "
                         "preprocessing) are taken from the saved defaults.", elem_classes="hint")
             with gr.Row():
@@ -1609,7 +1638,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         "systems as the photos. Each source of 3D faces has its own folder with the same layout as the project.",
                         elem_classes="lead")
             d_source = gr.Radio(list(D3_SOURCES), value=list(D3_SOURCES)[0], label="Source of the 3D faces",
-                                info="Reconstructed faces are written to 3D/, invented faces to 3D_basel/. The two sets are kept side by side.")
+                                info="Reconstructed faces go to 3D/, fitted Basel faces to 3D_basel_fit/, invented faces to 3D_basel/. "
+                                     "The sets are kept side by side.")
             d_caveat = gr.Markdown(D3_LEAD[f3.SUB] + " " + a3.caveat(f3.SUB) + " Strongly turned heads are skipped, because this simple "
                                    "mesh breaks for them.", elem_classes="hint")
             with gr.Column(visible=True) as d_box_photos:
@@ -1620,6 +1650,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                       label="Photos to turn into 3D faces (you can still add or remove single photos)")
             with gr.Column(visible=False) as d_box_basel:
                 d_model_note = gr.Markdown(basel_note(), elem_classes="hint")
+                d_fit_pose = gr.Radio(FIT_POSES, value=FIT_POSES[0], label="Head pose of the fitted head", visible=False,
+                                      info="Frontal: comparable with the invented faces. As in the photo: the pose found by the fit.")
                 with gr.Row():
                     d_n = gr.Slider(1, 50, value=cfg.BASEL_FACES, step=1, label="Number of invented faces",
                                     info="Seeds 1, 2, 3, …: the same number always gives the same face.")
@@ -1658,13 +1690,13 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                 d_gal_o = gr.Gallery(label="3D/Original/", columns=10, height=260, object_fit="contain", allow_preview=False)
                 d_gal_m = gr.Gallery(label="3D/Mooney/", columns=10, height=260, object_fit="contain", allow_preview=False)
             gr.Markdown("### Compare stimulus sets\n<span class='hint'>The photos of the main project, the faces reconstructed from "
-                        "photos and the invented Basel faces, each with what the same systems returned. " + a3.COMPARE_NOTE + "</span>",
+                        "photos, the Basel model fitted to photos and the invented Basel faces, each with what the same systems returned. " + a3.COMPARE_NOTE + "</span>",
                         elem_classes="prose")
             x_table = gr.Dataframe(headers=["Measure"] + [a3.SET_NAMES[k] for k in a3.SETS], interactive=False, wrap=True, max_height=760,
                                    label="One row per measure, one column per set")
             x_fig = gr.Image(show_label=False)
             x_lights = gr.Dataframe(headers=a3.LIGHT_HEADERS, interactive=False, wrap=True, max_height=760,
-                                    label="The two 3D sets by light direction")
+                                    label="The 3D sets by light direction")
             with gr.Row():
                 x_refresh = gr.Button("Refresh comparison", size="sm", scale=0)
                 x_export = gr.Button("Export comparison to figures/", size="sm", scale=0)
@@ -1780,12 +1812,13 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     # Run
     p_shown = [p_msg, p_table, p_fig, p_cmp, p_runs]
     p_run.click(pipeline, [p_name, p_note, p_keep, p_batch, p_sigma, p_white, p_bg, p_bgl, p_systems, p_3d, p_faces, p_export, p_save,
-                           p_vlm_set, p_3d_set],
+                           p_vlm_set, p_3d_set, p_fit_set],
                 [p_log] + p_shown + [status, c_runs])
     p_only.click(pipeline_save_only, [p_name, p_keep, p_note], [p_msg, p_runs, c_runs])
     tab_run.select(pipeline_view, None, p_shown)
     tab_run.select(lambda: (gr.update(choices=photo_set_choices(), value=vlm_scope_label()),
-                            gr.update(choices=photo_set_choices(suggest=True))), None, [p_vlm_set, p_3d_set])
+                            gr.update(choices=photo_set_choices(suggest=True)), gr.update(choices=photo_set_choices())), None,
+                   [p_vlm_set, p_3d_set, p_fit_set])
 
     # Analysis
     def analysis_groups(by):
@@ -1814,9 +1847,10 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     d_shown = [d_state, d_table, d_fig, d_person, d_sheet, d_gal_o, d_gal_m]
     x_shown = [x_table, x_lights, x_fig, x_msg]
     for button, steps in ((d_b1, ["render"]), (d_b2, ["Mooneys"]), (d_b3, ["systems"]), (d_all, ["render", "Mooneys", "systems"])):
-        button.click(d3_run(steps), [d_source, d_files, d_lights, d_person, d_n, d_model, d_poses, d_shadows],
+        button.click(d3_run(steps), [d_source, d_files, d_lights, d_person, d_n, d_model, d_poses, d_shadows, d_fit_pose],
                      [d_log] + d_shown).then(d3_compare, None, x_shown)
-    d_source.change(d3_switch, [d_source, d_model], [d_box_photos, d_box_basel, d_caveat, d_model_note, d_export] + d_shown)
+    d_source.change(d3_switch, [d_source, d_model], [d_box_photos, d_box_basel, d_caveat, d_model_note, d_export, d_n, d_poses, d_fit_pose,
+                                                     d_set, d_files] + d_shown)
     d_model.change(basel_note, d_model, d_model_note)
     d_suggest.click(d3_suggest, d_set, d_files)
     d_set.change(d3_suggest, d_set, d_files)

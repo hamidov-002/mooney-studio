@@ -23,6 +23,8 @@
   "BASEL_FACES": 10,
   "BASEL_SCALE": 0.9,
   "BASEL_SHADOWS": true,
+  "BASEL_FIT_COMPONENTS": 80,
+  "BASEL_FIT_SIGMA_MM": 1.5,
   "HOST": "127.0.0.1",
   "PORT": 0,
   "SHARE": false,

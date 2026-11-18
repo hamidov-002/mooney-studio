@@ -30,7 +30,7 @@ folder has its own project.
 | 4 | Vision systems | Each system runs on every original and every Mooney | `Result1/` … `Result4/`, `analysis/` |
 | 5 | Results | Summary table, figure, per-photo viewer, export | `figures/` |
 | – | Analysis | Results per photo, by group, agreement between systems, ranking; comparison of saved runs | `figures/analysis_*` |
-| 6 | 3D faces | Renders with known light and depth, their Mooneys, systems against the truth; comparison of the stimulus sets | `3D/`, `3D_basel/` |
+| 6 | 3D faces | Renders with known light and depth, their Mooneys, systems against the truth; comparison of the stimulus sets | `3D/`, `3D_basel_fit/`, `3D_basel/` |
 
 The strip of counters under the title shows where the project stands on every tab. The Overview tab says
 what to do next.
@@ -231,15 +231,16 @@ how many were adjusted by hand. Check there that the runs cover the same photos 
 A controlled version of the experiment. A photo tells us nothing certain about the light or the shape of the
 face. A picture we draw ourselves does: we choose the light, and we know the depth of every pixel.
 
-**Two sources of 3D faces.** Choose one at the top of the tab; the three step buttons, the tables, the chart,
-the sheet and the export then work on that source. The two sets are kept side by side.
+**Three sources of 3D faces.** Choose one at the top of the tab; the three step buttons, the tables, the chart,
+the sheet and the export then work on that source. The sets are kept side by side.
 
-| Source | Folder | What the faces are |
-|---|---|---|
-| Faces reconstructed from your photos | `3D/` | a mesh estimated from one photo of a real person; face region only, one skin colour |
-| Invented faces from the Basel Face Model | `3D_basel/` | random samples of a statistical face model; whole head with skin colour, no hair, no real person |
+| Source | Folder | What the faces are | What it is for |
+|---|---|---|---|
+| Faces reconstructed from your photos | `3D/` | a mesh estimated from one photo of a real person; face region only, one skin colour | your real people, with the pose of the photo |
+| Basel Face Model fitted to your photos | `3D_basel_fit/` | the Basel model fitted to the photo's landmarks: that person's overall proportions on a whole Basel head, skin tone matched, cast shadows | your real people, drawn like the invented faces |
+| Invented faces from the Basel Face Model | `3D_basel/` | random samples of a statistical face model; whole head with skin colour, no hair, no real person | perfect truth: nothing is estimated |
 
-The first source is described next, the Basel source after it.
+The first source is described next, the two Basel sources after it.
 
 **Steps.**
 
@@ -344,10 +345,44 @@ The sheet shows the face without shading and the true depth, then render and Moo
 depth of the whole thing shown, not an estimate of somebody. The faces are invented, have no hair and no
 glasses, and their skin has no shine. They vary less than real people do.
 
+### The Basel Face Model fitted to your photos
+
+The same model, but instead of random weights the shape weights and the head pose are fitted to the photo
+(`bfm_fit.py`). It needs the model file and `h5py`, like the invented faces.
+
+**How the fit works.** MediaPipe finds the face's landmarks in the photo. 19 of them have a counterpart among
+the landmarks stored in the model file: eye corners and lower lids, nose tip, nose wings and the point below
+the nose, philtrum, the outer lip line and mouth corners, chin. The fit looks for the head pose, the scale and
+the first 80 shape weights whose landmarks land where MediaPipe found them, while keeping the weights as likely
+as the model allows (an expected landmark error of 1.5 mm). It alternates the two parts eight times and takes
+under a second.
+
+| Setting | Default | Where |
+|---|---|---|
+| Photos | the project's subset (else the favourites) | *Take the photos from* in the tab; any set can be chosen |
+| Head pose of the fitted head | frontal | *as in the photo* draws the head in the pose the fit found |
+| Model file, cast shadows, lights | as for the invented faces | the tab |
+| Shape components, expected landmark error, skip threshold, tone matching | 80, 1.5 mm, 15 % of the eye distance, on | `config.py`: `BASEL_FIT_*` |
+
+**Check the fits.** For every photo `3D_basel_fit/truth/<photo>__fit.png` shows the photo with the outline of
+the fitted head (white), the landmarks MediaPipe found (green) and the fitted ones (red). The log gives the
+mean landmark error in pixels and as a share of the eye distance; photos above the threshold are skipped.
+
+**What is written.** The layout of `3D/`, with `truth/<photo>__fit.png`, `truth/<photo>__coefficients.npy`
+(the fitted weights), `truth/<photo>__texture.png` and, in `truth/renders.csv`, the landmark error and the
+tone gain of every fit.
+
+**What the truth is here.** As for the reconstructed faces: exact for the render, an estimate for the person.
+Landmarks fix the overall proportions (face width, nose length, position of eyes and mouth) but not fine
+detail, so the fitted heads stay close to the model's average face and look more alike than the people do.
+The skin has one colour matched to the photo; there is no hair. *Similarity render to photo* is calculated,
+with the render aligned on its own landmarks.
+
 ### Compare stimulus sets
 
 At the bottom of the tab. One table with one row per measure and one column per set: **Photos** (the main
-project), **Reconstructed 3D** (`3D/`), **Basel 3D** (`3D_basel/`). Every cell carries its own n.
+project), **Reconstructed 3D** (`3D/`), **Basel fitted 3D** (`3D_basel_fit/`), **Basel 3D** (`3D_basel/`).
+Every cell carries its own n.
 
 | Row | Meaning |
 |---|---|
@@ -362,12 +397,12 @@ background, so the whole-picture value mostly reflects the outline of the head. 
 comparison with the photos.
 
 The chart puts the sets side by side: how often a face is found, and for each depth system the correlation
-with the true depth (bars) and the Mooney-against-original value (diamonds). The second table lists the two 3D
+with the true depth (bars) and the Mooney-against-original value (diamonds). The second table lists the 3D
 sets by light direction, one row per light and set. *Export comparison to figures/* writes both tables and
 the chart to `project/figures/` (`compare_sets.csv`, `compare_sets_by_light.csv`, `compare_sets.png`).
 
 The sets differ in more than the source of the face: the photos have hair, background and unknown light; the
-reconstructed faces have no skin colour; the Basel faces have skin colour, a whole head and cast shadows. A
+reconstructed faces have no skin colour; the Basel faces (fitted and invented) have skin colour, a whole head and cast shadows. A
 difference between columns can come from any of these.
 
 ## Folders
@@ -389,6 +424,7 @@ project/
   rejected.csv         photos removed by hand
   _removed/            the removed photos themselves
   3D/                  3D faces reconstructed from photos: same layout again, plus truth/
+  3D_basel_fit/        the Basel Face Model fitted to your photos: same layout as 3D/
   3D_basel/            invented 3D faces from the Basel Face Model: same layout as 3D/
 runs/                  saved runs: <date>_<name>/ with Mooneys, results and run.json
 ```

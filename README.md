@@ -76,7 +76,7 @@ Switching does not move anything: each working folder has its own project.
 | Vision systems | face model, vision-language model, learned depth, depth from shading |
 | Results | summary table, figure, per-photo viewer; save the run under a name |
 | Analysis | results by properties of the photos; compare saved runs |
-| 3D faces | renders with known light and depth (from your photos or from the Basel Face Model), their Mooneys, the systems against the truth, comparison of the stimulus sets |
+| 3D faces | renders with known light and depth (reconstructed from your photos, the Basel Face Model fitted to them, or invented Basel faces), their Mooneys, the systems against the truth, comparison of the stimulus sets |
 | Notes | your own Markdown notes from the working folder (only if there are any) |
 | Docs | the manual |
 
@@ -101,7 +101,7 @@ project/
   dataset.csv          licence, author and source page of every photo
   params.csv           the values used for every Mooney
   settings.json        saved defaults
-  3D/, 3D_basel/       the 3D experiments: the same layout again, plus truth/
+  3D/, 3D_basel_fit/, 3D_basel/   the 3D experiments: the same layout again, plus truth/
 ```
 
 ## Settings
@@ -126,7 +126,8 @@ put it on the open internet without the login.
 
 ## Optional: the Basel Face Model
 
-The *3D faces* tab can draw invented faces from the Basel Face Model 2019. **The model is not included in
+The *3D faces* tab can draw invented faces from the Basel Face Model 2019, and fit the same model to the
+landmarks of your photos (a Basel head with each person's overall proportions). **The model is not included in
 this repository.** It is free for non-commercial research after registration, and it may not be
 redistributed, so everyone has to get their own copy:
 
