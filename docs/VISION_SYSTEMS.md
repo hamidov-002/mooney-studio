@@ -96,8 +96,26 @@ distance in metres.
 
 | Setting | Value |
 |---|---|
-| Model input | image resized to 518 × 518 px, scaled to 0–1, ImageNet mean and standard deviation removed |
-| Model output | resized back to the image size |
+| Model file | the authors' ViT-S weights as an ONNX file (export by fabio-sim, release v2.0.0), fixed input of 518 × 518 px, run on the CPU |
+| Model input | RGB scaled to 0–1, resized to 518 × 518 px (bicubic, as floating point), ImageNet mean and standard deviation removed |
+| Model output | brought back to the image size with bilinear interpolation, corners aligned |
+
+**Run as the authors run it.** These are the steps of the authors' own inference code
+(`DepthAnythingV2.infer_image` and `image2tensor` in the Depth Anything V2 repository): default input size 518,
+BGR to RGB, division by 255, bicubic resize, the same mean and standard deviation, bilinear resize of the
+output with aligned corners. Three points to know:
+
+- The resize is done on floating-point values, so the overshoot that bicubic interpolation produces at hard
+  black-white edges is kept, not clipped to 0–255. On photos this makes no visible difference (correlation
+  with a clipped version above 0.9999); on Mooneys it does (0.990 to 0.998), which is why it is done the
+  authors' way.
+- The authors keep the aspect ratio when resizing. Our images are square, so the fixed square input does the
+  same. A non-square image would be distorted.
+- The model file is a third-party export of the authors' weights. That the export returns the same numbers
+  as the authors' PyTorch model was not checked here.
+
+When the system starts it checks that the model file has the expected input and output and stops with a
+message if not.
 
 ### Calculated by us
 

@@ -392,15 +392,32 @@ class Depth:
     def __init__(self, log=print):
         import onnxruntime as ort
         self.s = ort.InferenceSession(model_path(DEPTH, log), providers=["CPUExecutionProvider"])
-        i = self.s.get_inputs()[0]
+        i, o = self.s.get_inputs()[0], self.s.get_outputs()[0]
         self.name, self.size = i.name, int(i.shape[2]) if isinstance(i.shape[2], int) else 518
+        # the file must be what the settings below describe: one RGB image in, one depth map out
+        if len(i.shape) != 4 or i.shape[1] != 3 or len(o.shape) != 3:
+            raise RuntimeError(f"{DEPTH[0]} is not the expected Depth Anything V2 export (input {i.shape}, output {o.shape}). "
+                               "Delete the file in models/ and run the system again to download it afresh.")
 
     def __call__(self, img: Image.Image) -> np.ndarray:
-        """Relative inverse depth (large = near), float32, at the image's own resolution."""
-        x = np.asarray(img.convert("RGB").resize((self.size, self.size), Image.BICUBIC), dtype=np.float32) / 255
-        x = ((x - self.MEAN) / self.STD).transpose(2, 0, 1)[None]
+        """
+        Relative inverse depth (large = near), float32, at the image's own resolution.
+        The steps are those of the authors' own inference code (DepthAnythingV2.infer_image / image2tensor):
+        RGB scaled to 0-1, bicubic resize as floating point (so overshoot at hard edges is kept, not clipped),
+        ImageNet mean and standard deviation, and the output brought back with bilinear interpolation, corners aligned.
+        Our images are square, so the fixed square input keeps the aspect ratio, as the authors' resize does.
+        """
+        import cv2
+        rgb = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
+        x = cv2.resize(rgb, (self.size, self.size), interpolation=cv2.INTER_CUBIC)
+        x = ((x - self.MEAN) / self.STD).transpose(2, 0, 1)[None].astype(np.float32)
         y = self.s.run(None, {self.name: x})[0].squeeze().astype(np.float32)
-        return np.asarray(Image.fromarray(y).resize(img.size, Image.BICUBIC))
+        w, h = img.size
+        if (h, w) == y.shape:
+            return y
+        gx = np.linspace(0, y.shape[1] - 1, w, dtype=np.float32)          # corners aligned, as in the authors' code
+        gy = np.linspace(0, y.shape[0] - 1, h, dtype=np.float32)
+        return cv2.remap(y, np.tile(gx, (h, 1)), np.tile(gy[:, None], (1, w)), interpolation=cv2.INTER_LINEAR)
 
 
 def _to_png(depth):
@@ -457,9 +474,12 @@ def run_depth(project, source="Original", log=print, progress=None):
     """System 3 - learned monocular depth (Depth Anything V2, ViT-S)."""
     dm = Depth(log)
     protocol(project, "result3_depth_protocol.json", {
-        "model": "Depth Anything V2, ViT-S, ONNX export, run on the CPU",
-        "model_input": f"image resized to {dm.size} x {dm.size} px (bicubic), scaled to 0-1, ImageNet mean and standard deviation removed",
-        "model_output": "one number per pixel: relative inverse depth, larger = nearer, no physical unit; resized back to the image size (bicubic)",
+        "model": "Depth Anything V2, ViT-S (the authors' weights, ONNX export by fabio-sim, release v2.0.0), run on the CPU",
+        "model_file": DEPTH[1],
+        "model_input": f"RGB scaled to 0-1, resized to {dm.size} x {dm.size} px (bicubic, floating point), ImageNet mean and standard "
+                       "deviation removed: the steps of the authors' inference code",
+        "model_output": "one number per pixel: relative inverse depth, larger = nearer, no physical unit; brought back to the image "
+                        "size with bilinear interpolation (corners aligned), as in the authors' code",
         **DEPTH_READING})
     return _run_depth_like(project, 3, "Depth Anything V2 ViT-S (ONNX)", dm, "result3_depth.csv", source, log, progress, "learned depth")
 
