@@ -12,7 +12,7 @@ Everything runs on a laptop. No GPU and no account are needed.
 ## Quick start
 
 ```
-git clone https://github.com/<your-account>/mooney-studio.git
+git clone https://github.com/hamidov-002/mooney-studio.git
 cd mooney-studio
 ./setup.sh
 ./run.sh
