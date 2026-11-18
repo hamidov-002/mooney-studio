@@ -26,7 +26,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -51,6 +53,7 @@ if os.path.basename(sys.argv[0]) == "app.py":       # only when started as a pro
     _command_line()
 
 import gradio as gr                                  # noqa: E402  (the imports below read the settings set above)
+import requests
 from PIL import Image
 
 import analysis as an
@@ -62,6 +65,7 @@ import collect_faces as cf
 import config as cfg
 import face3d as f3
 import results as rs
+import runqueue as rq
 import vision as vs
 from mooney import make_mooney, subject_mask, resize_max, face_brightness
 
@@ -170,23 +174,26 @@ def overview_md():
 
     if n == 0:
         nxt = ("**Start here.** This project is empty.\n\n"
-               "1. Open **Dataset**, enter a few names and press *Collect*. "
+               "1. Open **Dataset → Photos** in the menu on the left, enter a few names and press *Collect*. "
                "Or copy your own square face photos into the `Original/` folder shown below and reload the page.\n"
-               "2. Make the Mooneys in **Batch**.\n"
-               "3. Run the vision systems in **Vision systems** and read the outcome in **Results**.")
+               "2. Make the Mooneys in **Mooney → Batch**.\n"
+               "3. Run the vision systems in **Experiments → Vision systems** and read the outcome in **Analysis → Results**.\n\n"
+               "**Experiments → One-button run** does steps 2 and 3 in one go.")
     elif s["mooneys"] < n:
-        nxt = f"Make the Mooneys in **Batch** ({n - s['mooneys']} of {n} photos have none yet)."
+        nxt = f"Make the Mooneys in **Mooney → Batch** ({n - s['mooneys']} of {n} photos have none yet)."
     elif any(r[k] < tgt[k] for k in tgt):
         k = next(k for k in (1, 2, 3, 4) if r[k] < tgt[k])
-        nxt = f"Run system {k} in **Vision systems** ({r[k]} of {tgt[k]} photos done)."
+        nxt = f"Run system {k} in **Experiments → Vision systems** ({r[k]} of {tgt[k]} photos done)."
     elif s["subset"] < subset_target():
-        nxt = f"Mark your best Mooneys with the star in **Mooney**, then choose {subset_target()} of them in **Subset** and save."
+        nxt = (f"Mark your best Mooneys with the star in **Mooney → By hand**, then choose {subset_target()} of them in "
+               "**Dataset → Subsets** and save.")
     elif not s["figures"]:
-        nxt = "Press *Export figures* in **Results**."
+        nxt = "Press *Export figures* in **Analysis → Results**."
     else:
-        nxt = "Every step is done. Save the run in **Results** to keep it, or go on with **3D faces**."
+        nxt = ("Every step is done. Save the run in **Experiments** to keep it, or go on with a 3D dataset in "
+               "**Dataset → 3D datasets**.")
     if 0 < n < TARGET_PHOTOS:
-        nxt += f"  \nThe dataset has {n} of the {TARGET_PHOTOS} photos set as target; collect more in **Dataset** if you want the full set."
+        nxt += f"  \nThe dataset has {n} of the {TARGET_PHOTOS} photos set as target; collect more in **Dataset → Photos** if you want the full set."
 
     rule = ("the same for every photo" if st["white_rule"] == "fixed"
             else f"by face brightness ({st['bright_white']:g} % for faces brighter than {st['bright_border']:g})")
@@ -194,13 +201,13 @@ def overview_md():
         "### Next step", nxt, "",
         "### Progress",
         "| Step | Status | Detail |", "|---|---|---|",
-        f"| Dataset | {word(n >= TARGET_PHOTOS, n > 0)} | {n} photos of {s['people']} people; {s['pairs']} people have two or more photos |",
-        f"| Batch | {word(n > 0 and s['mooneys'] == n, s['mooneys'] > 0)} | {s['mooneys']} Mooneys for {n} photos |",
-        f"| Mooney (adjust by hand) | optional | {s['manual']} adjusted by hand, {s['favs']} favourites |",
+        f"| Photos | {word(n >= TARGET_PHOTOS, n > 0)} | {n} photos of {s['people']} people; {s['pairs']} people have two or more photos |",
+        f"| Mooneys (Batch) | {word(n > 0 and s['mooneys'] == n, s['mooneys'] > 0)} | {s['mooneys']} Mooneys for {n} photos |",
+        f"| Mooneys by hand | optional | {s['manual']} adjusted by hand, {s['favs']} favourites |",
         f"| Vision systems | {word(n > 0 and all(r[k] >= tgt[k] for k in tgt), max(r.values()) > 0)} | "
         f"face model {r[1]} / {n} · language model {r[2]} / {tgt[2]}{'' if vlm_scope_label() == SET_ALL else ' (' + vlm_scope_label() + ')'} · "
         f"learned depth {r[3]} / {n} · depth from shading {r[4]} / {n} |",
-        f"| Results | {word(s['figures'] > 0)} | {s['figures']} per-photo panels exported to figures/ |",
+        f"| Figures exported | {word(s['figures'] > 0)} | {s['figures']} per-photo panels exported to figures/ |",
         f"| Subset of {subset_target()} | {word(s['subset'] >= subset_target(), s['subset'] > 0)} | {s['subset']} pairs in Subset/ |",
         f"| 3D faces from photos | {d3_word()} | {d3_line()} |",
         f"| 3D faces: Basel model fitted to photos | {d3_word(bfm_fit.SUB)} | {d3_line(bfm_fit.SUB)} |",
@@ -209,7 +216,7 @@ def overview_md():
         "### Current generation settings",
         f"Background **{st['bg_mode']}** · phase-1 gray **{st['bg_level']}** · blur σ **{st['sigma']:g} px** · "
         f"white **{st['white']:g} %** of the face · white share **{rule}** · preprocessing **{st['preprocess']}**.  ",
-        "<span class='hint'>Change them in Batch; they are stored in the project's settings.json.</span>",
+        "<span class='hint'>Change them in Mooney → Batch; they are stored in the project's settings.json.</span>",
         "",
         "### Project folders",
         "| Folder | Images |", "|---|---:|",
@@ -224,9 +231,9 @@ def folders_md():
     notes = len(note_files())
     rows = [("Working folder", WORK_ROOT, "everything of yours: project, saved runs, notes"),
             ("Project", PROJECT_ROOT, "photos, Mooneys, results, settings"),
-            ("Saved runs", RUNS_ROOT, "frozen copies made in Results"),
-            ("Notes", NOTES_ROOT, f"{notes} Markdown file{'s' if notes != 1 else ''}, shown in the Notes tab" if notes
-             else "optional: Markdown files put here appear in a Notes tab after a restart"),
+            ("Saved runs", RUNS_ROOT, "frozen copies made in Experiments"),
+            ("Notes", NOTES_ROOT, f"{notes} Markdown file{'s' if notes != 1 else ''}, shown in Docs → Notes" if notes
+             else "optional: Markdown files put here appear in Docs → Notes after a restart"),
             ("Model files", os.path.join(HERE, "models"), "downloaded on first use, next to the code")]
     out = ["| | Folder | Holds |", "|---|---|---|"]
     out += [f"| {name} | <span class='mono'>{path}</span> | {what} |" for name, path, what in rows]
@@ -424,30 +431,112 @@ def params_table():
 
 
 # ============================================================================ long jobs with a readable log
-def run_logged(job, n_wait, final):
+_busy = {"what": None}                               # the long job that is working now, if any
+_busy_lock = threading.Lock()
+_stop = {"on": False, "was": False}                  # on: stop was asked for; was: the last job ended because of it
+Stopped = rq.StopNow                                 # raised inside a job at its next log line or progress step
+
+
+def busy_now():
+    """Name of the long job that is working (a run, Batch, the queue …), or None."""
+    return _busy["what"] or ("the queue" if rq.is_running() else None)
+
+
+def claim(what):
+    """Reserve the machine for one long job. False if another one is working."""
+    with _busy_lock:
+        if busy_now():
+            return False
+        _busy["what"] = what
+        _stop["on"] = _stop["was"] = False
+        return True
+
+
+def release():
+    _busy["what"] = None
+    _stop["on"] = False
+
+
+def busy_text():
+    return (f"Not started: {busy_now() or 'another job'} is still working. One job runs at a time; "
+            "wait until it has finished (its log shows where it is), or stop it.")
+
+
+def check_stop():
+    """Called at every log line and progress step of a job: ends the job there if Stop was pressed."""
+    if _stop["on"]:
+        raise Stopped()
+
+
+def stoppable(progress):
+    """A progress callback that also lets the job be stopped at this point."""
+    def prog(p, *a, **k):
+        check_stop()
+        return progress(p, *a, **k)
+    return prog
+
+
+def was_stopped():
+    return _stop["was"]
+
+
+def stop_job():
+    """The Stop button next to a long job. The job ends after the image or step it is working on."""
+    if rq.is_running():
+        gr.Info("The queue is running. Stop it in Experiments → Queue.")
+    elif _busy["what"]:
+        _stop["on"] = True
+        gr.Info(f"Stopping {_busy['what']}: it ends after the image it is working on.")
+    else:
+        gr.Info("Nothing is running.")
+
+
+STOP_NOTE = ("Files written so far stay as they are, so this step is only partly done "
+             "(for example Mooneys or results up to that photo). Running the step again completes it.")
+
+
+def run_logged(job, n_wait, final, what="another job"):
     """
     Run job(log) in a thread and stream its log to a textbox.
     Yields (log_text, n_wait x no-change) while it runs, then (log_text, *final()) once.
     Every log line gets the clock time in front; errors are shown in the log, not swallowed.
+    Only one such job works at a time: a second one is refused with a line in its log.
+    The job can be stopped: after Stop is pressed, its next log line or progress step ends it.
     """
+    if not claim(what):
+        yield (busy_text(),) + (gr.update(),) * n_wait
+        return
     lines, err = [], {}
 
-    def log(msg=""):
+    def emit(msg=""):
         msg = str(msg)
         lines.append(f"{time.strftime('%H:%M:%S')}  {msg}" if msg.strip() else "")
+
+    def log(msg=""):
+        check_stop()
+        emit(msg)
 
     def work():
         try:
             job(log)
+        except Stopped:
+            err["stopped"] = True
         except Exception:
             err["tb"] = traceback.format_exc()
+        finally:
+            _stop["was"] = bool(err.get("stopped"))
+            release()
 
     t = threading.Thread(target=work, daemon=True); t.start()
     while t.is_alive():
         time.sleep(0.5)
         yield ("\n".join(lines[-400:]),) + (gr.update(),) * n_wait
-    if err:
-        log(""); log("STOPPED WITH AN ERROR"); lines.extend(err["tb"].strip().splitlines()[-12:])
+    if err.get("stopped"):
+        last = next((l for l in reversed(lines) if l.strip()), "")
+        m = re.search(r"\[\s*(\d+)\s*/\s*(\d+)\s*\]", last) or re.search(r"\s(\d+)/(\d+)\s", last)
+        emit(""); emit("STOPPED BY YOU" + (f" after {m.group(1)} of {m.group(2)}" if m else "") + ". " + STOP_NOTE)
+    elif err:
+        emit(""); emit("STOPPED WITH AN ERROR"); lines.extend(err["tb"].strip().splitlines()[-12:])
     yield ("\n".join(lines[-400:]),) + tuple(final())
 
 
@@ -463,8 +552,8 @@ def collect(names_text, per_id, n_cand, min_face, progress=gr.Progress()):
         yield "Enter at least one name, one per line.", gr.update(), gr.update(), gr.update(); return
     open(NAMES_FILE, "w", encoding="utf-8").write("\n".join(names) + "\n")            # the box is remembered
     job = lambda log: cf.collect(PROJECT_ROOT, names, per_identity=int(per_id), candidates=int(n_cand),
-                                 min_face_frac=float(min_face), log=log, progress=lambda p: progress(p))
-    yield from run_logged(job, 3, lambda: (gallery_of("Original"), dataset_table(), status_html()))
+                                 min_face_frac=float(min_face), log=log, progress=stoppable(lambda p: progress(p)))
+    yield from run_logged(job, 3, lambda: (gallery_of("Original"), dataset_table(), status_html()), what="the photo collection")
 
 
 def pick_photo(evt: gr.SelectData):
@@ -507,8 +596,8 @@ def run_batch(source, sigma, white, bg_mode, bg_level, separate, rule, bright_wh
         PROJECT_ROOT, source=source, sigmas=sigmas, whites=whites, bg_level=int(bg_level), separate=bool(separate),
         bg_mooney=bg_mode, stats_on="face" if measure.startswith("Face") else "subject", white_rule=RULES[rule],
         bright_white=float(bright_white) / 100, bright_border=float(bright_border), preprocess=preprocess,
-        keep_manual=bool(keep_manual), log=log, progress=lambda p: progress(p))
-    yield from run_logged(job, 3, lambda: (gallery_of("Mooney"), params_table(), status_html()))
+        keep_manual=bool(keep_manual), log=log, progress=stoppable(lambda p: progress(p)))
+    yield from run_logged(job, 3, lambda: (gallery_of("Mooney"), params_table(), status_html()), what="Batch")
 
 
 def save_defaults(sigma, white, bg_mode, bg_level, separate, rule, bright_white, bright_border, preprocess):
@@ -549,7 +638,7 @@ def subset_view(name, size, show, chosen, msg=""):
     state = ("not saved yet" if saved is None else "saved" if sorted(saved) == sorted(chosen) else "**changed since it was saved**")
     line = (f"**{len(chosen)} of {size}** chosen · {state}"
             + (" · this is the project's subset (also in `Subset/`)" if d["active"] == str(name or "").strip() and saved is not None else "")
-            + f" · {len(cand)} Mooneys offered" + (" (mark more with the star in **Mooney**)" if show == SUBSET_SHOW[0] else ""))
+            + f" · {len(cand)} Mooneys offered" + (" (mark more with the star in **Mooney → By hand**)" if show == SUBSET_SHOW[0] else ""))
     orig = {os.path.splitext(f)[0]: f for f in images_in("Original")}
     return (line,
             [(P("Mooney", s + ".png"), ("✓ " if s in chosen else "") + s) for s in cand],
@@ -802,17 +891,6 @@ def lab_reset():
 
 
 # ============================================================================ Vision systems
-def vision_job(fn, **kw):
-    def handler(*args, progress=gr.Progress()):
-        init_project()
-        extra = kw["args"](*args) if "args" in kw else {}
-        if extra is None:
-            yield kw["refuse"], gr.update(); return
-        job = lambda log: fn(project=PROJECT_ROOT, log=log, progress=lambda p: progress(p), **extra)
-        yield from run_logged(job, 1, lambda: (status_html(),))
-    return handler
-
-
 def vlm_args(source, identify, model, prompt, scope):
     """Arguments for system 2, or None (= refuse to start) when no model is chosen or the chosen set is empty."""
     if not model:
@@ -845,7 +923,7 @@ def results_load():
     table = [[r.get(c, "") for c in SUMMARY_COLS] for r in rows] or None
     fig = rs.figure(PROJECT_ROOT)
     stems = rs.stems(PROJECT_ROOT)
-    msg = "" if rows else "No results yet. Run a system in Vision systems, then press Refresh."
+    msg = "" if rows else "No results yet. Run a system in Experiments → Vision systems, then press Refresh."
     if rows and fig is None:
         msg = "Table only: the figure needs matplotlib (`pip install matplotlib`)."
     return table, fig, gr.update(choices=stems, value=(stems[0] if stems else None)), msg
@@ -879,7 +957,7 @@ RUN_LABELS = {v[0]: k for k, v in an.RUN_GROUPS.items()}          # label shown 
 def runs_compare(names):
     head, rows, shead, srows = an.compare_runs(PROJECT_ROOT, RUNS_ROOT, names)
     if not rows and not srows:
-        return gr.update(value=None), gr.update(value=None), "Choose two or more runs. Save a run in Results first."
+        return gr.update(value=None), gr.update(value=None), "Choose two or more runs. Save a run in Experiments first."
     note = "" if len(names or []) > 1 else "Choose at least one more run to compare."
     return gr.update(value=rows or None, headers=head), gr.update(value=srows, headers=shead), note
 
@@ -947,37 +1025,26 @@ def d3_sheet(source, stem):
     return a3.person_sheet(PROJECT_ROOT, stem, sub=d3_sub(source)) if stem else None
 
 
-def d3_results(source, person=None):
-    """Everything the 3D tab shows below the log: state line, table by light, chart, face chooser and sheet, galleries."""
-    sub = d3_sub(source)
-    head, rows = a3.light_table(PROJECT_ROOT, sub)
-    people = a3.sources(PROJECT_ROOT, sub)
-    person = person if person in people else (people[0] if people else None)
-    return (d3_line(sub), gr.update(value=rows or None, headers=head), a3.fig_truth(PROJECT_ROOT, sub) if rows else None,
-            gr.update(choices=people, value=person), a3.person_sheet(PROJECT_ROOT, person, sub=sub) if person else None,
-            gr.update(value=d3_gallery("Original", sub), label=f"{sub}/Original/"),
-            gr.update(value=d3_gallery("Mooney", sub), label=f"{sub}/Mooney/"))
-
-
 def d3_switch(source, which):
-    """The source of 3D faces was changed: show its controls, its explanation and its results."""
+    """The source of 3D faces was changed: show its controls, its explanation and what its folder holds."""
     sub = d3_sub(source)
     basel, fitted = sub == bfm.SUB, sub == bfm_fit.SUB
     photo_set = fit_default_set() if fitted else SET_SUGGEST
     return (gr.update(visible=not basel), gr.update(visible=basel or fitted), D3_LEAD[sub] + " " + a3.caveat(sub)
             + (" Strongly turned heads are skipped, because this simple mesh breaks for them." if sub == f3.SUB else ""),
-            basel_note(which), gr.update(value=f"Export to {sub}/figures/"),
+            basel_note(which),
             gr.update(visible=basel), gr.update(visible=basel), gr.update(visible=fitted),
             gr.update(choices=photo_set_choices(suggest=True), value=photo_set),
-            gr.update(choices=images_in("Original"), value=photo_set_files(photo_set))) + d3_results(source)
+            gr.update(choices=images_in("Original"), value=photo_set_files(photo_set))) + d3_data_view(source)
 
 
 def d3_suggest(choice=SET_SUGGEST):
     return gr.update(choices=images_in("Original"), value=photo_set_files(choice))
 
 
-def d3_job(steps, sub, files, lights, basel, progress):
-    """The chosen steps of the 3D chain as one job for run_logged. Each step checks that the one before it was done."""
+def d3_job(steps, sub, files, lights, basel, progress, systems=None):
+    """The chosen steps of the 3D chain as one job for run_logged. Each step checks that the one before it was done.
+    systems: which of 1, 3 and 4 the step "systems" runs (None = all three)."""
     def job(log):
         root = P(sub)
         for k, step in enumerate(steps):
@@ -985,7 +1052,7 @@ def d3_job(steps, sub, files, lights, basel, progress):
                 if k:
                     log("")
                 log(f"Step {k + 1} of {len(steps)}: {step}")
-            prog = lambda p, k=k, step=step: progress((k + p) / len(steps), desc=step)
+            prog = stoppable(lambda p, k=k, step=step: progress((k + p) / len(steps), desc=step))
             if step == "render" and sub == bfm_fit.SUB:
                 if not files or not lights:
                     log("Choose at least one photo and one light direction."); return
@@ -1010,10 +1077,10 @@ def d3_job(steps, sub, files, lights, basel, progress):
                 f3.run_render_set(PROJECT_ROOT, list(files), [l for l in f3.LIGHTS if l in lights], identities=who, log=log, progress=prog)
             elif step == "Mooneys":
                 if not d3_gallery("Original", sub):
-                    log("No renders yet - press 1 Render first."); return
+                    log("No renders yet - press Render first."); return
                 st = load_settings()
                 a3.clear_results(PROJECT_ROOT, sub)                 # results of earlier Mooneys would no longer match
-                log(f"Settings as saved in Batch: blur {st['sigma']:g} · white {st['white']:g} % · background {st['bg_mode']}.")
+                log(f"Settings as saved in Mooney → Batch: blur {st['sigma']:g} · white {st['white']:g} % · background {st['bg_mode']}.")
                 bt.run_batch(root, source="Original", sigmas=(float(st["sigma"]),), whites=(float(st["white"]) / 100,),
                              bg_level=int(st["bg_level"]), separate=bool(st["separate"]), bg_mooney=st["bg_mode"],
                              white_rule=st["white_rule"], bright_white=float(st["bright_white"]) / 100,
@@ -1021,19 +1088,26 @@ def d3_job(steps, sub, files, lights, basel, progress):
                              log=log, progress=prog)
             else:
                 if not d3_gallery("Mooney", sub):
-                    log("No Mooneys of the renders yet - press 2 Make Mooneys first."); return
-                vs.run_face(root, "Original", log=log, progress=lambda p: prog(0.2 * p))
-                log(""); vs.run_depth(root, "Original", log=log, progress=lambda p: prog(0.2 + 0.4 * p))
-                log(""); vs.run_shading(root, "Original", log=log, progress=lambda p: prog(0.6 + 0.3 * p))
+                    log("No Mooneys of the renders yet - make them in Dataset → 3D datasets first."); return
+                which = [n for n in (1, 3, 4) if systems is None or n in systems]
+                if not which:
+                    log("Tick at least one of the systems 1, 3 and 4."); return
+                parts = {1: (vs.run_face, 0.0, 0.2), 3: (vs.run_depth, 0.2, 0.4), 4: (vs.run_shading, 0.6, 0.3)}
+                for i, n in enumerate(which):
+                    fn, start, share = parts[n]
+                    if i:
+                        log("")
+                    fn(root, "Original", log=log, progress=lambda p, start=start, share=share: prog(start + share * p))
                 log(""); a3.score_truth(PROJECT_ROOT, log=log, progress=lambda p: prog(0.9 + 0.1 * p), sub=sub)
     return job
 
 
 def d3_run(steps):
-    def handler(source, files, lights, person, n_faces, model, poses, shadows, fit_pose="frontal", progress=gr.Progress()):
+    def handler(source, files, lights, n_faces, model, poses, shadows, fit_pose="frontal", progress=gr.Progress()):
         init_project()
         basel = {"faces": n_faces or cfg.BASEL_FACES, "model": model, "poses": poses or [], "shadows": shadows, "fit_pose": fit_pose}
-        yield from run_logged(d3_job(steps, d3_sub(source), files, lights, basel, progress), 7, lambda: d3_results(source, person))
+        yield from run_logged(d3_job(steps, d3_sub(source), files, lights, basel, progress), 3, lambda: d3_data_view(source),
+                              what="the 3D step")
     return handler
 
 
@@ -1047,7 +1121,8 @@ def d3_compare():
     """The comparison of the stimulus sets: table by measure, table by light, chart, and a line if there is nothing yet."""
     head, rows = a3.compare_sets(PROJECT_ROOT)
     lhead, lrows = a3.compare_lights(PROJECT_ROOT)
-    msg = "" if rows else "Nothing to compare yet. Run the vision systems on the photos and the three steps above for a 3D source."
+    msg = "" if rows else ("Nothing to compare yet. Run the vision systems on the photos and on a 3D dataset "
+                           "in Experiments → Vision systems.")
     return (gr.update(value=rows or None, headers=head), gr.update(value=lrows or None, headers=lhead),
             a3.fig_compare(PROJECT_ROOT) if rows else None, msg)
 
@@ -1084,37 +1159,46 @@ def runs_table():
 
 
 def pipeline_view(msg=""):
-    """What the Run tab shows below the log: message, summary table, figure, comparison of the stimulus sets, saved runs."""
+    """What the one-button run shows below its log: message, summary table, figure, comparison of the stimulus sets."""
     rows = rs.summary(PROJECT_ROOT)
     table = [[r.get(c, "") for c in SUMMARY_COLS] for r in rows] or None
     head, crows = a3.compare_sets(PROJECT_ROOT)
-    return (msg, table, rs.figure(PROJECT_ROOT) if rows else None, gr.update(value=crows or None, headers=head),
-            gr.update(value=runs_table(), headers=RUNS_COLS))
+    return (msg, table, rs.figure(PROJECT_ROOT) if rows else None, gr.update(value=crows or None, headers=head))
 
 
-def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
-             vlm_set=None, d3_set=SET_SUGGEST, d3_fit_set=None, progress=gr.Progress()):
-    """
-    One full run: Mooneys, vision systems, 3D faces, figures, saved copy - each part only if it is ticked.
-    Nothing here computes anything itself; every step calls the same function as its own tab.
-    """
-    init_project()
-    systems, d3 = list(systems or []), list(d3 or [])
-    refuse = None
-    if do_save and not an.run_slug(name):
-        refuse = "Not started: give the run a name first, or untick *Save the run*."
-    elif not images_in("Original"):
-        refuse = "Not started: there are no photos yet. Collect some in **Dataset** first."
-    elif not do_batch and not images_in("Mooney"):
-        refuse = "Not started: there are no Mooneys yet. Tick *Make the Mooneys*."
-    elif not (do_batch or systems or d3 or do_export or do_save):
-        refuse = "Not started: nothing is ticked."
-    if refuse:
-        yield (gr.update(), refuse) + (gr.update(),) * 6
-        return
+PIPE_KEYS = ["name", "note", "keep", "do_batch", "sigma", "white", "bg_mode", "bg_level", "systems", "d3", "n_faces", "do_export",
+             "do_save", "vlm_set", "d3_set", "d3_fit_set"]
 
-    steps, saved = [], {}
-    if do_batch:
+
+def pipeline_config(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
+                    vlm_set=None, d3_set=SET_SUGGEST, d3_fit_set=None):
+    """The form of the one-button run as a plain dict (it can be stored in the queue file)."""
+    return {"name": str(name or "").strip(), "note": str(note or "").strip(), "keep": list(keep or []), "do_batch": bool(do_batch),
+            "sigma": float(sigma), "white": float(white), "bg_mode": bg_mode, "bg_level": int(bg_level),
+            "systems": list(systems or []), "d3": list(d3 or []), "n_faces": int(n_faces or cfg.BASEL_FACES),
+            "do_export": bool(do_export), "do_save": bool(do_save), "vlm_set": vlm_set, "d3_set": d3_set or SET_SUGGEST,
+            "d3_fit_set": d3_fit_set}
+
+
+def pipeline_refusal(c):
+    """Why a run cannot start, or None."""
+    if c["do_save"] and not an.run_slug(c["name"]):
+        return "Not started: give the run a name first, or untick *Save the run*."
+    if not images_in("Original"):
+        return "Not started: there are no photos yet. Collect some in **Dataset → Photos** first."
+    if not c["do_batch"] and not images_in("Mooney"):
+        return "Not started: there are no Mooneys yet. Tick *Make the Mooneys*."
+    if not (c["do_batch"] or c["systems"] or c["d3"] or c["do_export"] or c["do_save"]):
+        return "Not started: nothing is ticked."
+    return None
+
+
+def pipeline_steps(c, saved):
+    """The steps of one run as (title, weight, fn(log, prog)). Every step calls the same function as its own page."""
+    name, note, keep, systems, d3 = c["name"], c["note"], c["keep"], c["systems"], c["d3"]
+    sigma, white, bg_mode, bg_level, vlm_set = c["sigma"], c["white"], c["bg_mode"], c["bg_level"], c["vlm_set"]
+    steps = []
+    if c["do_batch"]:
         def step_batch(log, prog):
             st = save_settings(sigma=float(sigma), white=float(white), bg_mode=bg_mode, bg_level=int(bg_level))
             log(f"Values: blur {st['sigma']:g} · white {st['white']:g} % · background {st['bg_mode']} · phase-1 gray {st['bg_level']}. "
@@ -1140,14 +1224,14 @@ def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, system
         steps.append(("System 2 Vision-language model", 3, step_vlm))
     for label in d3:
         def step_3d(log, prog, label=label):
-            basel = {"faces": int(n_faces or cfg.BASEL_FACES), "model": "Whole head", "poses": ["frontal"], "shadows": cfg.BASEL_SHADOWS}
-            which = (d3_fit_set or fit_default_set()) if D3_SOURCES[label] == bfm_fit.SUB else d3_set
+            basel = {"faces": int(c["n_faces"] or cfg.BASEL_FACES), "model": "Whole head", "poses": ["frontal"], "shadows": cfg.BASEL_SHADOWS}
+            which = (c["d3_fit_set"] or fit_default_set()) if D3_SOURCES[label] == bfm_fit.SUB else c["d3_set"]
             if D3_SOURCES[label] != bfm.SUB:
                 log(f"Photos: {which} ({len(photo_set_files(which))})")
             d3_job(["render", "Mooneys", "systems"], D3_SOURCES[label], photo_set_files(which),
                    [l for l in cfg.LIGHTS_3D if l in f3.LIGHTS], basel, lambda v, desc=None: prog(v))(log)
         steps.append((f"3D faces: {label}", 4, step_3d))
-    if do_export:
+    if c["do_export"]:
         def step_export(log, prog):
             favs = load_favs()
             made = rs.export(PROJECT_ROOT, favs or rs.stems(PROJECT_ROOT)[:10])
@@ -1160,32 +1244,519 @@ def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, system
             if made:
                 log(f"figures/: comparison of the stimulus sets, {len(made)} files.")
         steps.append(("Export figures", 1, step_export))
-    if do_save:
+    if c["do_save"]:
         def step_save(log, prog):
             saved["folder"], saved["msg"] = an.save_run(PROJECT_ROOT, RUNS_ROOT, name, include=[RUN_LABELS[x] for x in (keep or [])], note=note)
             log(saved["msg"])
         steps.append(("Save the run", 1, step_save))
+    return steps
 
+
+def pipeline_job(c, saved, progress=None):
+    """One run as a job(log): used by the Run button (with a progress bar) and by the queue (without)."""
+    steps = pipeline_steps(c, saved)
     total = sum(w for _, w, _ in steps)
+    progress = progress or (lambda *a, **k: None)
 
     def job(log):
         t0, done = time.time(), 0
-        log(f"Run{' “' + str(name).strip() + '”' if str(name).strip() else ''}: {len(steps)} steps.")
+        log(f"Run{' “' + c['name'] + '”' if c['name'] else ''}: {len(steps)} steps.")
         for k, (title, w, fn) in enumerate(steps):
             log(""); log(f"── Step {k + 1} of {len(steps)}: {title}")
-            fn(log, lambda p, done=done, w=w, title=title: progress((done + w * min(max(float(p), 0), 1)) / total, desc=title))
+            fn(log, stoppable(lambda p, done=done, w=w, title=title: progress((done + w * min(max(float(p), 0), 1)) / total, desc=title)))
             done += w
         log(""); log(f"Finished in {(time.time() - t0) / 60:.1f} min.")
+    return job
+
+
+def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
+             vlm_set=None, d3_set=SET_SUGGEST, d3_fit_set=None, progress=gr.Progress()):
+    """
+    One full run: Mooneys, vision systems, 3D faces, figures, saved copy - each part only if it is ticked.
+    Nothing here computes anything itself; every step calls the same function as its own page.
+    """
+    init_project()
+    c = pipeline_config(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
+                        vlm_set, d3_set, d3_fit_set)
+    refuse = pipeline_refusal(c)
+    if refuse:
+        yield (gr.update(), refuse) + (gr.update(),) * 5
+        return
+    saved = {}
 
     def final():
-        msg = saved.get("msg") or ("Finished. Not saved as a run (the box was not ticked)." if not do_save else "Finished, but the run was not saved; see the log.")
+        if was_stopped():
+            msg = "Stopped by you. The run was **not saved**. " + STOP_NOTE
+        else:
+            msg = saved.get("msg") or ("Finished. Not saved as a run (the box was not ticked)." if not c["do_save"]
+                                       else "Finished, but the run was not saved; see the log.")
         return pipeline_view(msg) + (status_html(), gr.update(choices=run_choices()))
-    yield from run_logged(job, 7, final)
+    yield from run_logged(pipeline_job(c, saved, progress), 6, final, what="a run")
 
 
 def pipeline_save_only(name, keep, note):
     folder, msg = an.save_run(PROJECT_ROOT, RUNS_ROOT, name, include=[RUN_LABELS[x] for x in (keep or [])], note=note)
-    return msg, gr.update(value=runs_table(), headers=RUNS_COLS), gr.update(choices=run_choices())
+    return msg, gr.update(choices=run_choices())
+
+
+# ============================================================================ Queue (runs one after another, unattended)
+QUEUE_COLS = ["#", "Name", "State", "Added", "Started", "Min", "Message"]
+QUEUE_NOTE = ("Every run in the queue is frozen in its own saved copy. The project itself is one folder, so after the queue it "
+              "holds the Mooneys and results of the **last** run; put the run you want to keep working on last.")
+
+
+def queue_run_one(c, log):
+    """What the queue does with one item: the same run as the Run button. Returns the line shown in the queue table."""
+    init_project()
+    c = {**{k: None for k in PIPE_KEYS}, **c}
+    refuse = pipeline_refusal(c)
+    if refuse:
+        raise RuntimeError(refuse.replace("**", "").replace("*", ""))
+    saved = {}
+
+    def stoppable_log(msg=""):
+        check_stop()
+        log(msg)
+    try:
+        pipeline_job(c, saved)(stoppable_log)
+    finally:
+        _stop["on"] = False
+    return saved.get("msg") or "finished, but not saved; see the log"
+
+
+def queue_items():
+    return rq.load(PROJECT_ROOT)["items"]
+
+
+def queue_view(msg=None):
+    """Table, chooser of an item, log of the item that runs (or ran last), state line."""
+    items = queue_items()
+    rows, choices, k = [], [], 0
+    for it in items:
+        pos = ""
+        if it["state"] == rq.WAITING:
+            k += 1; pos = k
+        rows.append([pos, it["name"], it["state"], it["added"], it["started"], it["minutes"], it["message"]])
+        choices.append((f"{it['name']}  ·  {it['state']}" + (f"  ·  position {pos}" if pos else ""), it["id"]))
+    text, name = rq.current_log(PROJECT_ROOT)
+    waiting = sum(1 for it in items if it["state"] == rq.WAITING)
+    if rq.is_running():
+        line = f"**The queue is running**: “{name}” now, {waiting} waiting."
+    elif busy_now():
+        line = f"The queue is not running; {busy_now()} is working. {waiting} waiting."
+    else:
+        line = f"The queue is not running. {waiting} waiting." if items else "The queue is empty. Add runs in **One-button run**."
+    out = (gr.update(value=rows or None, headers=QUEUE_COLS), gr.update(choices=choices),
+           gr.update(value=text, label=f"Log of “{name}”" if name else "Log"), line)
+    return out + ((msg,) if msg is not None else ())
+
+
+def queue_tick():
+    """What the timer refreshes while the Queue page is shown: table, log and state line (not the chooser)."""
+    table, _choices, log, line = queue_view()
+    return table, log, line
+
+
+def queue_add(*form):
+    c = pipeline_config(*form)
+    if not an.run_slug(c["name"]):
+        return "Not added: give the run a name first. The queue saves each run under its name."
+    if not c["do_save"]:
+        return "Not added: tick *Save the run*. A queued run that is not saved would be overwritten by the next one."
+    refuse = pipeline_refusal(c)
+    if refuse:
+        return refuse.replace("Not started", "Not added")
+    rq.add(PROJECT_ROOT, c["name"], c)
+    n = sum(1 for it in queue_items() if it["state"] == rq.WAITING)
+    return (f"Added “{c['name']}” to the queue (position {n}). It keeps the values of this form as they are now. "
+            "Start the queue in **Queue**.")
+
+
+def queue_start():
+    if rq.is_running():
+        return queue_view("The queue is already running.")
+    if busy_now():
+        return queue_view(busy_text())
+    if not any(it["state"] == rq.WAITING for it in queue_items()):
+        return queue_view("Nothing is waiting. Add runs in **One-button run**.")
+    _stop["on"] = False
+    rq.start(PROJECT_ROOT, queue_run_one)
+    return queue_view("Started. The runs go one after another; this page follows the log. You can close the browser window, "
+                      "but the app (the terminal window) must stay open and the computer awake.")
+
+
+def queue_stop():
+    if not rq.is_running():
+        return queue_view("The queue is not running.")
+    rq.stop_after_current()
+    return queue_view("The run that is working now will finish; the ones after it stay waiting.")
+
+
+def queue_stop_now():
+    if not rq.is_running():
+        return queue_view("The queue is not running.")
+    _stop["on"] = True
+    return queue_view("Stopping now: the run ends after the image it is working on and is marked *stopped*; it is not saved. "
+                      "The runs after it stay waiting. " + STOP_NOTE)
+
+
+def queue_change(item_id, what):
+    if not item_id:
+        return queue_view("Choose an item first.")
+    if what == "remove":
+        ok = rq.remove(PROJECT_ROOT, item_id)
+        msg = "Removed." if ok else "Not removed: an item that is running cannot be removed."
+    else:
+        ok = rq.move(PROJECT_ROOT, item_id, -1 if what == "up" else 1)
+        msg = "Moved." if ok else "Not moved: only waiting items can be moved, within the waiting ones."
+    return queue_view(msg)
+
+
+def queue_clear():
+    rq.clear_finished(PROJECT_ROOT)
+    return queue_view("Finished, failed and stopped items were taken off the list. Their saved runs are untouched.")
+
+
+# ============================================================================ Saved runs (reading one run)
+def run_folder_choices():
+    return list(reversed(an.list_runs(RUNS_ROOT)))
+
+
+def run_show(folder):
+    """Facts, summary table and figure of one saved run, read from its folder. Nothing in the run is changed."""
+    if not folder or not os.path.isdir(os.path.join(RUNS_ROOT, folder)):
+        return "Choose a saved run.", None, None
+    path = os.path.join(RUNS_ROOT, folder)
+    try:
+        j = json.load(open(os.path.join(path, "run.json"), encoding="utf-8"))
+    except Exception:
+        j = {}
+    lines = [f"### {j.get('name', folder)}", f"Saved **{j.get('saved', '?')}** · folder `runs/{folder}/`"
+             + (f" · note: {j['note']}" if j.get("note") else ""), ""]
+    used = j.get("used") or {}
+    if used:
+        lines += ["| Made with | |", "|---|---|"] + [f"| {k} | {v} |" for k, v in used.items()] + [""]
+    counts = {k: v for k, v in (j.get("counts") or {}).items() if v}
+    if counts:
+        lines.append("Holds: " + " · ".join(f"`{k}/` {v}" for k, v in counts.items()) + ".")
+    rows = rs.summary(path)
+    table = [[r.get(c, "") for c in SUMMARY_COLS] for r in rows] or None
+    fig = None
+    if rows:                                              # drawn into a temporary file, so the frozen run stays as it is
+        fig = rs.figure(path, path=os.path.join(tempfile.gettempdir(), f"mooney_run_{an.run_slug(folder)}.png"))
+    if not rows:
+        lines.append("\nThis run holds no result tables.")
+    return "\n".join(lines), table, fig
+
+
+def runs_page():
+    return gr.update(value=runs_table(), headers=RUNS_COLS), gr.update(choices=run_folder_choices())
+
+
+# ============================================================================ Vision systems on any dataset
+V_PHOTOS = "Photos"
+V_SYSTEMS = ["1 Face model", "2 Vision-language model", "3 Learned depth", "4 Depth from shading", "5 3D face mesh (optional)"]
+V_3D = [V_SYSTEMS[0], V_SYSTEMS[2], V_SYSTEMS[3]]
+
+
+def v_datasets():
+    """Photos, and every 3D source that has Mooneys to run on."""
+    return [V_PHOTOS] + [label for label, sub in D3_SOURCES.items() if d3_gallery("Mooney", sub)]
+
+
+def v_results(dataset):
+    """What the Vision systems page shows below the log for the chosen dataset: line, table, figure."""
+    if dataset in D3_SOURCES:
+        sub = D3_SOURCES[dataset]
+        head, rows = a3.light_table(PROJECT_ROOT, sub)
+        return (f"`{sub}/`: {d3_line(sub)}. The table is by light direction, against the true depth.",
+                gr.update(value=rows or None, headers=head, label="One row per light direction"),
+                a3.fig_truth(PROJECT_ROOT, sub) if rows else None)
+    rows = rs.summary(PROJECT_ROOT)
+    table = [[r.get(c, "") for c in SUMMARY_COLS] for r in rows] or None
+    return ("" if rows else "No results for the photos yet.",
+            gr.update(value=table, headers=SUMMARY_COLS, label="Summary   counts are images, other values are means"),
+            rs.figure(PROJECT_ROOT) if rows else None)
+
+
+def v_switch(dataset, ticks):
+    """Another dataset was chosen: offer the systems that can run on it and show its results."""
+    if dataset in D3_SOURCES:
+        choices, value = V_3D, [t for t in (ticks or []) if t in V_3D] or V_3D
+    else:
+        choices, value = V_SYSTEMS, [t for t in (ticks or []) if t in V_SYSTEMS] or V_3D
+    return (gr.update(choices=choices, value=value),) + v_results(dataset)
+
+
+def v_page(dataset, ticks):
+    """The page is opened: current datasets, the saved choice for system 2, results."""
+    ds = v_datasets()
+    dataset = dataset if dataset in ds else V_PHOTOS
+    return (gr.update(choices=ds, value=dataset), gr.update(choices=photo_set_choices(), value=vlm_scope_label())) + v_switch(dataset, ticks)
+
+
+def vision_run(dataset, ticks, source, identify, model, prompt, scope, progress=gr.Progress()):
+    """Run the ticked systems on the chosen dataset, one after another, with one log."""
+    init_project()
+    ticks = [t for t in V_SYSTEMS if t in (ticks or [])]
+    final = lambda: (status_html(),) + v_results(dataset)
+    if not ticks:
+        yield ("Tick at least one system.",) + (gr.update(),) * 4
+        return
+    if dataset in D3_SOURCES:
+        nums = [int(t[0]) for t in ticks if t in V_3D]
+        job = d3_job(["systems"], D3_SOURCES[dataset], None, None, {}, progress, systems=nums)
+        yield from run_logged(job, 4, final, what="the vision systems")
+        return
+    if not images_in("Mooney"):
+        yield ("There are no Mooneys yet. Make them in Mooney → Batch first.",) + (gr.update(),) * 4
+        return
+    steps = []
+    for t in ticks:
+        n = int(t[0])
+        if n == 1:
+            steps.append((t, lambda log, prog: vs.run_face(project=PROJECT_ROOT, log=log, progress=prog, source=source, identify=bool(identify))))
+        elif n == 2:
+            def step_vlm(log, prog):
+                extra = vlm_args(source, identify, model, prompt, scope)
+                if extra is None:
+                    log("Skipped: either the chosen set of photos is empty or no Ollama model is selected "
+                        "(start Ollama with `ollama serve`, pull a vision model, then press the check button in the settings below).")
+                    return
+                log(f"On: {scope}" + ("" if extra["only"] is None else f" ({len(extra['only'])} photos)"))
+                vs.run_vlm(project=PROJECT_ROOT, log=log, progress=prog, **extra)
+            steps.append((t, step_vlm))
+        elif n == 3:
+            steps.append((t, lambda log, prog: vs.run_depth(project=PROJECT_ROOT, log=log, progress=prog, source=source)))
+        elif n == 4:
+            steps.append((t, lambda log, prog: vs.run_shading(project=PROJECT_ROOT, log=log, progress=prog, source=source)))
+        else:
+            steps.append((t, lambda log, prog: vs.run_mesh(project=PROJECT_ROOT, log=log, progress=prog, source=source)))
+
+    def job(log):
+        for k, (title, fn) in enumerate(steps):
+            if k:
+                log("")
+            if len(steps) > 1:
+                log(f"── {k + 1} of {len(steps)}: system {title}")
+            fn(log, stoppable(lambda p, k=k, title=title: progress((k + min(max(float(p), 0), 1)) / len(steps), desc=title)))
+    yield from run_logged(job, 4, final, what="the vision systems")
+
+
+# ---------------------------------------------------------------------------- Ollama (the server behind system 2)
+# Three fixed actions only: look, start the server, download a model through the server's own API.
+# There is no command box anywhere in the app on purpose: it would hand a shell to anyone who can open the page.
+OLLAMA_LOG = os.path.join(WORK_ROOT, "ollama_server.log")
+MODEL_NAME = re.compile(r"^[A-Za-z0-9._/-]+(:[A-Za-z0-9._-]+)?$")
+
+
+def ollama_status():
+    """One line: is the program installed, does the server answer, which models are there."""
+    exe, models = shutil.which("ollama"), vs.ollama_models()
+    prog = f"program installed (`{exe}`)" if exe else "program **not installed** ([get it here](https://ollama.com/download))"
+    if models is None:
+        srv = f"server **not answering** at `{vs.OLLAMA}`"
+    else:
+        srv = f"server answering at `{vs.OLLAMA}` · " + ("models: " + ", ".join(f"`{m}`" for m in models) if models
+                                                           else "**no model downloaded yet**")
+    return f"Ollama: {prog} · {srv}"
+
+
+def ollama_refresh(msg=""):
+    models = vs.ollama_models() or []
+    return ollama_status() + (f"  \n{msg}" if msg else ""), gr.update(choices=models, value=pick_model(models)), vs.status()["vlm"]
+
+
+def ollama_start():
+    """Start `ollama serve` in the background if the program is installed and the server does not answer."""
+    if vs.ollama_models() is not None:
+        return ollama_refresh("The server is already running; nothing was started.")
+    exe = shutil.which("ollama")
+    if not exe:
+        return ollama_refresh("Not started: the Ollama program is not installed on this computer. Install it from "
+                              "https://ollama.com/download, then press *Start Ollama* again.")
+    try:
+        os.makedirs(WORK_ROOT, exist_ok=True)
+        out = open(OLLAMA_LOG, "ab")
+        subprocess.Popen([exe, "serve"], stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        return ollama_refresh(f"Not started: {e}")
+    for _ in range(12):                                   # the server needs a moment
+        time.sleep(0.5)
+        if vs.ollama_models() is not None:
+            return ollama_refresh(f"Started. It keeps running after this app is closed; its output goes to `{OLLAMA_LOG}`.")
+    return ollama_refresh(f"Started, but the server does not answer yet. Press *Check* in a few seconds; its output is in `{OLLAMA_LOG}`.")
+
+
+def ollama_pull(name, progress=gr.Progress()):
+    """Download a model through the server's own API (POST /api/pull), with the progress in the page's log."""
+    name = str(name or "").strip()
+    keep = (gr.update(),) * 3
+    if not MODEL_NAME.match(name):
+        yield ("Not started: a model name looks like `llava:7b` (letters, digits, . _ / - and an optional :tag).",) + keep
+        return
+    if vs.ollama_models() is None:
+        yield ("Not started: the Ollama server is not answering. Press Start Ollama first (settings of the systems).",) + keep
+        return
+
+    def job(log):
+        log(f"Downloading {name} through {vs.OLLAMA}/api/pull. This can be several GB.")
+        last = {"line": "", "t": 0.0}
+        with requests.post(vs.OLLAMA + "/api/pull", json={"model": name, "name": name, "stream": True}, stream=True, timeout=(10, 600)) as r:
+            r.raise_for_status()
+            for raw in r.iter_lines():
+                check_stop()
+                if not raw:
+                    continue
+                d = json.loads(raw)
+                if d.get("error"):                         # for example a model name the registry does not know
+                    log(f"Not downloaded. The Ollama server answered: {d['error']}"); return
+                done, total = d.get("completed"), d.get("total")
+                line = d.get("status", "")
+                if total:
+                    progress(done / total if done else 0, desc=line)
+                    line += f"  {100 * (done or 0) / total:.0f} % of {total / 1e9:.2f} GB"
+                if line != last["line"] and (time.time() - last["t"] > 2 or not total):   # not one line per chunk
+                    log(line); last.update(line=line, t=time.time())
+        log(f"Finished. {name} is installed." if name in (vs.ollama_models() or [])
+            else "The download ended, but the model is not in the server's list yet; press Check.")
+    yield from run_logged(job, 3, lambda: ollama_refresh(f"`{name}`: see the log."), what="a model download")
+
+
+def v_save_run(name, keep, note):
+    folder, msg = an.save_run(PROJECT_ROOT, RUNS_ROOT, name, include=[RUN_LABELS[x] for x in (keep or [])], note=note)
+    return msg, gr.update(choices=run_choices())
+
+
+# ============================================================================ 3D datasets: named copies of a 3D source
+D3_SETS = "3D_sets"
+D3_SET_COLS = ["Name", "Source", "Saved", "Faces", "Lights", "Renders", "Mooneys", "Systems run", "Mooneys made with"]
+
+
+def d3_set_list():
+    """Saved 3D datasets, newest first: the content of each <project>/3D_sets/<name>/set.json."""
+    out, base = [], P(D3_SETS)
+    for d in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        try:
+            j = json.load(open(os.path.join(base, d, "set.json"), encoding="utf-8"))
+        except Exception:
+            continue
+        j["folder"] = d
+        out.append(j)
+    return sorted(out, key=lambda j: j.get("saved", ""), reverse=True)
+
+
+def d3_set_table():
+    rows = []
+    for j in d3_set_list():
+        st = j.get("status", {})
+        rows.append([j.get("name", j["folder"]), j.get("source", ""), j.get("saved", ""), st.get("faces", ""), st.get("lights", ""),
+                     st.get("renders", ""), st.get("mooneys", ""), ", ".join(str(n) for n in st.get("systems", [])) or "–",
+                     j.get("mooney_settings", "")])
+    return rows or None
+
+
+def d3_set_choices():
+    return [(f"{j.get('name', j['folder'])}  ·  {j.get('source', '')}", j["folder"]) for j in d3_set_list()]
+
+
+def d3_sets_view(msg=None):
+    out = (gr.update(value=d3_set_table(), headers=D3_SET_COLS), gr.update(choices=d3_set_choices()))
+    return out + ((msg,) if msg is not None else ())
+
+
+def d3_data_view(source):
+    """State line and the two galleries of the live 3D set of a source."""
+    sub = d3_sub(source)
+    return (f"`{sub}/`: {d3_line(sub)}",
+            gr.update(value=d3_gallery("Original", sub), label=f"{sub}/Original/   the renders"),
+            gr.update(value=d3_gallery("Mooney", sub), label=f"{sub}/Mooney/   their Mooneys"))
+
+
+def d3_set_save(source, name):
+    """Copy the live folder of a source to 3D_sets/<name>/data and note what it is. The live folder is not changed."""
+    sub, slug = d3_sub(source), subset_slug(name)
+    if busy_now():
+        return d3_sets_view(busy_text())
+    if not slug:
+        return d3_sets_view("Give the 3D dataset a name first.")
+    if not d3_gallery("Original", sub):
+        return d3_sets_view(f"Nothing to save: `{sub}/` holds no renders yet.")
+    dst = P(D3_SETS, slug)
+    if os.path.exists(dst):
+        return d3_sets_view(f"A 3D dataset called “{slug}” exists already. Choose another name, or delete that one first.")
+    shutil.copytree(P(sub), os.path.join(dst, "data"))
+    used = an.used_settings(P(sub)) if os.path.exists(P(sub, "params.csv")) else {}
+    info = {"name": str(name).strip(), "source": source, "sub": sub, "saved": time.strftime("%Y-%m-%d %H:%M"),
+            "status": a3.status(PROJECT_ROOT, sub),
+            "mooney_settings": (f"blur {used.get('Blur σ (px)', '–')} · white {used.get('White target', '–')} · "
+                                f"{used.get('Background', '–')}") if used else "no Mooneys"}
+    json.dump(info, open(os.path.join(dst, "set.json"), "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    return d3_sets_view(f"Saved “{info['name']}” to `{D3_SETS}/{slug}/`: {d3_line(sub)}.")
+
+
+def d3_set_load(folder):
+    """Put a saved 3D dataset back as the live folder of its source (what was there is replaced)."""
+    if busy_now():
+        return (gr.update(),) * 4 + d3_sets_view(busy_text())
+    j = next((x for x in d3_set_list() if x["folder"] == folder), None)
+    if not j:
+        return (gr.update(),) * 4 + d3_sets_view("Choose a saved 3D dataset first.")
+    sub = j.get("sub")
+    source = next((label for label, s in D3_SOURCES.items() if s == sub), None)
+    src = P(D3_SETS, folder, "data")
+    if source is None or not os.path.isdir(src):
+        return (gr.update(),) * 4 + d3_sets_view("This saved 3D dataset cannot be read.")
+    before = d3_line(sub)
+    shutil.rmtree(P(sub), ignore_errors=True)
+    shutil.copytree(src, P(sub))
+    msg = (f"Loaded “{j.get('name', folder)}” as `{sub}/` ({source}). It replaced: {before}. "
+           "The saved copy stays as it is.")
+    return (gr.update(value=source),) + d3_data_view(source) + d3_sets_view(msg)
+
+
+def d3_set_delete(folder):
+    if not folder or not os.path.isdir(P(D3_SETS, folder)):
+        return d3_sets_view("Choose a saved 3D dataset first.")
+    shutil.rmtree(P(D3_SETS, folder), ignore_errors=True)
+    return d3_sets_view(f"Deleted the saved 3D dataset “{folder}”. The live folders were not touched.")
+
+
+def d3_truth_view(source, person=None):
+    """Analysis → 3D comparison, upper part: state, table by light, chart, face chooser and its sheet."""
+    sub = d3_sub(source)
+    head, rows = a3.light_table(PROJECT_ROOT, sub)
+    people = a3.sources(PROJECT_ROOT, sub)
+    person = person if person in people else (people[0] if people else None)
+    line = f"`{sub}/`: {d3_line(sub)}. " + a3.caveat(sub)
+    if not rows:
+        line += " **No scores yet:** run systems on this 3D set in **Experiments → Vision systems**."
+    return (line, gr.update(value=rows or None, headers=head), a3.fig_truth(PROJECT_ROOT, sub) if rows else None,
+            gr.update(choices=people, value=person), a3.person_sheet(PROJECT_ROOT, person, sub=sub) if person else None,
+            gr.update(value=f"Export to {sub}/figures/"))
+
+
+# ============================================================================ References
+def references_md():
+    """docs/REFERENCES.md with the photo credits of this project put under its Photos section."""
+    text = read_doc("REFERENCES.md", "_docs/REFERENCES.md is missing._")
+    clean = lambda v: re.sub(r"<[^>]+>", "", str(v or "")).replace("|", "/").replace("\n", " ").strip()
+    rows = []
+    for r in read_csv("dataset.csv"):
+        link = f"[source page]({r['commons_url']})" if r.get("commons_url") else "–"
+        rows.append((clean(r.get("identity")), clean(r.get("file")), clean(r.get("author")) or "–", clean(r.get("license")) or "–", link))
+    for r in read_csv("credits.csv"):
+        src = clean(r.get("source"))
+        link = f"[source]({src})" if src.startswith("http") else (src or "–")
+        rows.append(("", clean(r.get("file")), clean(r.get("author")) or "–", clean(r.get("licence") or r.get("license")) or "–", link))
+    if rows:
+        table = [f"**{len(rows)} photos in this project.**", "", "| Person | File | Author | Licence | Source |", "|---|---|---|---|---|"]
+        table += [f"| {a} | `{b}` | {c} | {d} | {e} |" for a, b, c, d, e in rows]
+    else:
+        table = ["_This project holds no photos yet._"]
+    mark = "## Use of AI"
+    block = "\n".join(table) + "\n\n"
+    return text.replace(mark, block + mark) if mark in text else text + "\n\n" + block
 
 
 # ============================================================================ documents shown in the app
@@ -1277,6 +1848,23 @@ footer { display: none !important; }
 .chip b { color: var(--ink); font-weight: 600; margin-left: 3px; font-variant-numeric: tabular-nums; }
 .chip.ok { border-color: var(--ok); background: var(--ok-bg); } .chip.ok b { color: var(--ok); }
 .chip.part { border-color: var(--part); background: var(--part-bg); } .chip.part b { color: var(--part); }
+#shell { align-items: flex-start; gap: 22px; flex-wrap: nowrap; }
+#navcol { flex: 0 0 158px !important; min-width: 158px !important; position: sticky; top: 10px; align-self: flex-start; gap: 2px !important;
+  border-right: 1px solid var(--line); padding-right: 10px; }
+#navcol button { justify-content: flex-start; text-align: left; border: none !important; border-left: 3px solid transparent !important;
+  border-radius: 0 3px 3px 0; background: transparent; box-shadow: none; font-weight: 500; font-size: 13.5px; padding: 8px 11px;
+  color: var(--muted); min-width: 0; }
+#navcol button:hover { color: var(--ink); background: color-mix(in srgb, var(--line) 40%, transparent); }
+#navcol button.primary { border-left-color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 11%, transparent);
+  color: var(--accent); font-weight: 600; }
+#main { min-width: 0; flex: 1 1 0 !important; }
+@media (max-width: 900px) {
+  #shell { flex-wrap: wrap; gap: 8px; }
+  #navcol { flex: 1 1 100% !important; flex-direction: row !important; flex-wrap: wrap; position: static; border-right: none;
+    border-bottom: 1px solid var(--line); padding: 0 0 6px; }
+  #navcol button { flex: 0 0 auto; width: auto; border-left: none !important; border-bottom: 3px solid transparent !important; border-radius: 3px 3px 0 0; }
+  #navcol button.primary { border-bottom-color: var(--accent) !important; }
+}
 .tabs > .tab-nav button, .tab-wrapper button { font-size: 12.5px; letter-spacing: 0.02em; }
 .tabs > .tab-nav button.selected, .tab-wrapper button.selected { color: var(--accent) !important; border-bottom: 2px solid var(--accent) !important; font-weight: 600; }
 .hint, .hint p { font-size: 12px; color: var(--muted); }
@@ -1309,423 +1897,551 @@ try:
 except Exception as _e:                                         # noqa
     print("reconcile:", _e)
 _st, _vs = load_settings(), vs.status()
+NAV = ["Home", "Dataset", "Mooney", "Experiments", "Analysis", "Docs"]
 
 with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     gr.HTML("<div id='head'><div class='mark'></div><div><h1>Mooney Studio</h1><div class='sub'>Two-tone face images, "
             "and what vision systems make of them</div></div></div>")
     status = gr.HTML(status_html())
 
-    with gr.Tabs():
-        # ------------------------------------------------------------------ Overview
-        with gr.Tab("Overview") as tab_overview:
-            overview = gr.Markdown(overview_md(), elem_classes=["prose", "ov"])
-            ov_refresh = gr.Button("Refresh", size="sm", scale=0)
-            gr.Markdown("### Where your data is kept", elem_classes="prose")
-            ov_folders = gr.Markdown(folders_md(), elem_classes=["prose", "folders"])
-            with gr.Row():
-                ov_work = gr.Textbox(WORK_ROOT, label="Working folder", scale=4, max_lines=1,
-                                     info="Any folder outside the code folder. It is created if it does not exist; ~ is your home folder.")
-                ov_work_btn = gr.Button("Use this folder", size="md", scale=1, min_width=150)
-            ov_work_msg = gr.Markdown("The change takes effect after a restart of the app. To use another folder for one start "
-                                      "only: `./run.sh --work FOLDER`.", elem_classes="hint")
+    with gr.Row(elem_id="shell"):
+        # the menu on the left: one button per section; the selected one is drawn as 'primary'
+        with gr.Column(elem_id="navcol", scale=0, min_width=158):
+            nav_btns = [gr.Button(n, variant="primary" if i == 0 else "secondary", size="md") for i, n in enumerate(NAV)]
+        with gr.Column(elem_id="main", scale=1):
 
-        # ------------------------------------------------------------------ Run
-        with gr.Tab("Run") as tab_run:
-            gr.Markdown("One full run with one button. Give it a name, tick the steps and set their values, then press **Run**. "
-                        "Every step does exactly what its own tab does, in this order; the log shows where it is. "
-                        "At the end the run is saved under its name and date and the results appear below.", elem_classes="lead")
-            with gr.Row():
-                p_name = gr.Textbox("", label="Name of the run", placeholder="for example: final run", scale=2, max_lines=1)
-                p_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=3, max_lines=1,
-                                    placeholder="for example: blur 6, 23 % white, 22 Mooneys adjusted by hand")
-            with gr.Group():
-                p_batch = gr.Checkbox(True, label="Step 1 · Make the Mooneys (same as Batch; Mooneys adjusted by hand are kept)")
+            # ================================================================== Home
+            with gr.Column(visible=True) as sec_home:
+                overview = gr.Markdown(overview_md(), elem_classes=["prose", "ov"])
+                ov_refresh = gr.Button("Refresh", size="sm", scale=0)
+                gr.Markdown("### Where your data is kept", elem_classes="prose")
+                ov_folders = gr.Markdown(folders_md(), elem_classes=["prose", "folders"])
                 with gr.Row():
-                    p_sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (px)")
-                    p_white = gr.Slider(5, 60, value=_st["white"], step=0.5, label="White share of the face (%)")
-                    p_bg = gr.Radio(["black", "white"], value=_st["bg_mode"] if _st["bg_mode"] in ("black", "white") else "black",
-                                    label="Background of the Mooney")
-                    p_bgl = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray")
-            with gr.Row():
-                p_systems = gr.CheckboxGroup(PIPE_SYSTEMS, value=[PIPE_SYSTEMS[0], PIPE_SYSTEMS[2], PIPE_SYSTEMS[3]],
-                                             label="Step 2 · Vision systems, on every original and every Mooney", scale=3)
-            with gr.Row():
-                p_3d = gr.CheckboxGroup(list(D3_SOURCES), value=[], scale=3,
-                                        label="Step 3 · 3D faces: render, make Mooneys, run systems 1, 3 and 4 against the true depth")
-                p_faces = gr.Slider(2, 30, value=cfg.BASEL_FACES, step=1, label="Basel faces", scale=1)
-            with gr.Row():
-                p_vlm_set = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=1)
-                p_3d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="Reconstructed 3D uses", scale=1)
-                p_fit_set = gr.Dropdown(photo_set_choices(), value=fit_default_set(), label="Basel fitted 3D uses", scale=1)
-            with gr.Row():
-                p_export = gr.Checkbox(True, label="Step 4 · Export figures", scale=1)
-                p_save = gr.Checkbox(True, label="Step 5 · Save the run under its name", scale=1)
-                p_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
-                                          label="The saved run includes, besides the Mooneys and their values", scale=3)
-            gr.Markdown("The two photo-based 3D sources use the chosen photos and the five default lights; the fitted heads are drawn "
-                        "frontal with cast shadows. Invented Basel faces are whole heads, frontal, "
-                        "with cast shadows. For other choices use the **3D faces** tab. Other Batch options (white rule, "
-                        "preprocessing) are taken from the saved defaults.", elem_classes="hint")
-            with gr.Row():
-                p_run = gr.Button("Run", variant="primary", scale=2)
-                p_only = gr.Button("Only save the current state as a run", scale=1)
-            p_log = gr.Textbox(label="Log", lines=12, max_lines=12, interactive=False, autoscroll=True, elem_classes="log")
-            p_msg = gr.Markdown(elem_classes="hint")
-            gr.Markdown("### Results of the current state", elem_classes="prose")
-            p_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
-            p_fig = gr.Image(show_label=False, height=380)
-            p_cmp = gr.Dataframe(interactive=False, wrap=True, max_height=520, label="Photos and 3D sets side by side (empty until a 3D step has run)")
-            gr.Markdown("### Saved runs\n<span class='hint'>Newest first. Compare them in **Analysis**; each is a folder in the "
-                        "runs folder shown on Overview.</span>", elem_classes="prose")
-            p_runs = gr.Dataframe(headers=RUNS_COLS, interactive=False, wrap=True, column_widths=RUNS_WIDTHS)
+                    ov_work = gr.Textbox(WORK_ROOT, label="Working folder", scale=4, max_lines=1,
+                                         info="Any folder outside the code folder. It is created if it does not exist; ~ is your home folder.")
+                    ov_work_btn = gr.Button("Use this folder", size="md", scale=1, min_width=150)
+                ov_work_msg = gr.Markdown("The change takes effect after a restart of the app. To use another folder for one start "
+                                          "only: `./run.sh --work FOLDER`.", elem_classes="hint")
 
-        # ------------------------------------------------------------------ Dataset
-        with gr.Tab("Dataset"):
-            gr.Markdown("Collect openly licensed portraits from Wikimedia Commons, look through them, and remove the ones you do not want. "
-                        "Each photo is cropped from hair to collar and saved at 512 × 512 px in `Original/`; the uncropped photo goes to `Raw/` "
-                        "and its licence, author and source page to `dataset.csv`.", elem_classes="lead")
-            with gr.Row():
-                names_box = gr.Textbox(names_default(), label="People, one per line (as on Wikimedia Commons)", lines=9, scale=2)
-                with gr.Column(scale=3):
-                    collect_btn = gr.Button("Collect", variant="primary", size="md")
-                    ds_log = gr.Textbox(label="Log   + added   = already complete   - skipped   ! Commons error", lines=8, max_lines=8,
-                                        interactive=False, autoscroll=True, elem_classes="log")
-            with gr.Accordion("Collection settings (the defaults are recommended)", open=False):
-                with gr.Row():
-                    per_id = gr.Slider(1, 4, cfg.COLLECT_PER_PERSON, step=1, label="Photos per person")
-                    n_cand = gr.Slider(20, 160, cfg.COLLECT_CANDIDATES, step=10, label="Candidates looked at per person")
-                    min_face = gr.Slider(0.02, 0.3, cfg.COLLECT_MIN_FACE, step=0.01, label="Smallest face (share of the photo)")
-                gr.Markdown("A photo is kept only if all of these hold: open licence (CC0, CC BY, CC BY-SA, public domain) · the file title "
-                            "contains the person's first name and surname · it is a photograph, not a painting or statue · exactly one face · "
-                            "the crop lies inside the photo and is at least 480 px wide · the face is sharp and neither too dark nor too bright · "
-                            "the photos of one person come from different occasions · no photo is used for two people. "
-                            "People who already have all their photos are skipped.", elem_classes="hint")
-            ds_gallery = gr.Gallery(gallery_of("Original"), label="Original/   click a photo to select it", columns=10, height=420, object_fit="cover")
-            with gr.Row():
-                ds_sel = gr.Textbox("", label="Selected photo", interactive=False, scale=2)
-                ds_del = gr.Button("Remove selected photo", variant="stop", scale=1)
-            ds_msg = gr.Markdown("Removing moves the photo to `_removed/` (it is not deleted), deletes its Mooney and result files, and stops "
-                                 "that photo from being collected again. Press Collect afterwards to fetch a replacement.", elem_classes="hint")
-            with gr.Accordion("dataset.csv", open=False):
-                ds_table = gr.Dataframe(dataset_table(), headers=["identity", "file", "licence", "author", "date", "yaw", "sharpness", "source page"],
-                                        wrap=True, interactive=False)
+            # ================================================================== Dataset
+            with gr.Column(visible=False) as sec_dataset:
+                pg_dataset = gr.State("Photos")
+                with gr.Tabs():
+                    # -------------------------------------------------------------- Photos
+                    with gr.Tab("Photos") as tab_photos:
+                        gr.Markdown("Collect openly licensed portraits from Wikimedia Commons, look through them, and remove the ones you do not want. "
+                                    "Each photo is cropped from hair to collar and saved at 512 × 512 px in `Original/`; the uncropped photo goes to `Raw/` "
+                                    "and its licence, author and source page to `dataset.csv`.", elem_classes="lead")
+                        with gr.Row():
+                            names_box = gr.Textbox(names_default(), label="People, one per line (as on Wikimedia Commons)", lines=9, scale=2)
+                            with gr.Column(scale=3):
+                                with gr.Row():
+                                    collect_btn = gr.Button("Collect", variant="primary", size="md", scale=4)
+                                    ds_stop = gr.Button("Stop", variant="stop", size="md", scale=1, min_width=80)
+                                ds_log = gr.Textbox(label="Log   + added   = already complete   - skipped   ! Commons error", lines=8, max_lines=8,
+                                                    interactive=False, autoscroll=True, elem_classes="log")
+                        with gr.Accordion("Collection settings (the defaults are recommended)", open=False):
+                            with gr.Row():
+                                per_id = gr.Slider(1, 4, cfg.COLLECT_PER_PERSON, step=1, label="Photos per person")
+                                n_cand = gr.Slider(20, 160, cfg.COLLECT_CANDIDATES, step=10, label="Candidates looked at per person")
+                                min_face = gr.Slider(0.02, 0.3, cfg.COLLECT_MIN_FACE, step=0.01, label="Smallest face (share of the photo)")
+                            gr.Markdown("A photo is kept only if all of these hold: open licence (CC0, CC BY, CC BY-SA, public domain) · the file title "
+                                        "contains the person's first name and surname · it is a photograph, not a painting or statue · exactly one face · "
+                                        "the crop lies inside the photo and is at least 480 px wide · the face is sharp and neither too dark nor too bright · "
+                                        "the photos of one person come from different occasions · no photo is used for two people. "
+                                        "People who already have all their photos are skipped.", elem_classes="hint")
+                        ds_gallery = gr.Gallery(gallery_of("Original"), label="Original/   click a photo to select it", columns=10, height=420, object_fit="cover")
+                        with gr.Row():
+                            ds_sel = gr.Textbox("", label="Selected photo", interactive=False, scale=2)
+                            ds_del = gr.Button("Remove selected photo", variant="stop", scale=1)
+                        ds_msg = gr.Markdown("Removing moves the photo to `_removed/` (it is not deleted), deletes its Mooney and result files, and stops "
+                                             "that photo from being collected again. Press Collect afterwards to fetch a replacement.", elem_classes="hint")
+                        with gr.Accordion("dataset.csv", open=False):
+                            ds_table = gr.Dataframe(dataset_table(), headers=["identity", "file", "licence", "author", "date", "yaw", "sharpness", "source page"],
+                                                    wrap=True, interactive=False)
 
-        # ------------------------------------------------------------------ Batch
-        with gr.Tab("Batch"):
-            gr.Markdown("Make a Mooney for every photo with one set of values. The values below are the project defaults; "
-                        "afterwards you can adjust single photos by hand in **Mooney**, and Batch will leave those alone.", elem_classes="lead")
-            with gr.Row():
-                b_sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.5, label="Blur σ (pixels, at 512 px)")
-                b_white = gr.Slider(1, 99, value=_st["white"], step=1, label="White (% of the face)")
-                b_bgm = gr.Radio(["black", "white", "auto"], value=_st["bg_mode"], label="Background of the Mooney")
-                b_bgl = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray (changes only the outline of the person)")
-            with gr.Accordion("Optional settings (off or at their default unless you change them)", open=False):
-                with gr.Row():
-                    b_rule = gr.Radio(list(RULES), value=RULE_LABEL[_st["white_rule"]], label="White share")
-                    b_bw = gr.Slider(1, 99, value=_st["bright_white"], step=1, label="White for bright faces (%)")
-                    b_bb = gr.Slider(60, 200, value=_st["bright_border"], step=1, label="A face is bright from brightness")
-                gr.Markdown("*By face brightness* gives bright, evenly lit faces more white, because at a small white share they tend "
-                            "to break into fragments. It depends partly on skin tone, so say so if you use it.", elem_classes="hint")
-                with gr.Row():
-                    b_pre = gr.Radio(["none", "clahe"], value=_st["preprocess"], label="Preprocessing before the blur")
-                    b_measure = gr.Radio(["Face", "Whole person"], value="Face", label="White share is counted on")
-                    b_sep = gr.Checkbox(_st["separate"], label="Separate the background (U²-Net)")
-                    b_keep = gr.Checkbox(True, label="Keep Mooneys adjusted by hand")
-                    b_src = gr.Radio(["Original", "Raw"], value="Original", label="Source folder")
-                with gr.Row():
-                    b_sweep = gr.Checkbox(False, label="Sweep: try several values per photo and keep the best-scoring one")
-                    b_sig = gr.CheckboxGroup(["3", "4", "6", "8"], value=["4", "6"], label="Blur values to try")
-                    b_wht = gr.CheckboxGroup(["20", "22", "25", "28", "30", "35"], value=["20", "25"], label="White shares to try (%)")
-            with gr.Row():
-                b_run = gr.Button("Generate all Mooneys", variant="primary", size="md", scale=2)
-                b_save_def = gr.Button("Save these values as defaults", size="md", scale=1)
-            b_log = gr.Textbox(label="Log", lines=9, max_lines=9, interactive=False, autoscroll=True, elem_classes="log")
-            b_favs = gr.Textbox(fav_text(), label="Favourites (click a Mooney below to add or remove it; choose the subset from them in the Subset tab)", interactive=False)
-            b_gal = gr.Gallery(gallery_of("Mooney"), label="Mooney/", columns=10, height=420, object_fit="contain", allow_preview=False)
-            with gr.Accordion("params.csv (every value used, per photo)", open=False):
-                b_tab = gr.Dataframe(params_table(), headers=PARAM_COLS, interactive=False, wrap=True)
+                    # -------------------------------------------------------------- Subsets
+                    with gr.Tab("Subsets") as tab_subset:
+                        gr.Markdown("Choose the pairs that go into a subset. Click a Mooney on the left to add it, click it again or click it on the "
+                                    "right to take it out, then **Save**. A subset has a name and a size; you can keep several.", elem_classes="lead")
+                        _sub0 = load_subsets()
+                        _sub_name = _sub0["active"] or (sorted(_sub0["sets"])[0] if _sub0["sets"] else "main")
+                        with gr.Row():
+                            s_pick = gr.Dropdown(choices=sorted(_sub0["sets"]), value=_sub_name if _sub_name in _sub0["sets"] else None, scale=2,
+                                                 label="Open a saved subset")
+                            s_name = gr.Textbox(_sub_name, label="Name (a new name saves a new subset)", max_lines=1, scale=2)
+                            s_size = gr.Number(_sub0["sets"].get(_sub_name, {}).get("size", TARGET_SUBSET), label="Size", precision=0, minimum=1,
+                                               maximum=500, scale=1, min_width=90)
+                            s_show = gr.Radio(SUBSET_SHOW, value=SUBSET_SHOW[0], label="Show", scale=2)
+                        s_line = gr.Markdown(elem_classes="prose")
+                        s_chosen = gr.State([])
+                        with gr.Row():
+                            with gr.Column(scale=3):
+                                s_cand = gr.Gallery(label="Click to add or remove   ✓ = in the subset", columns=6, height=560, object_fit="contain",
+                                                    allow_preview=False)
+                            with gr.Column(scale=2):
+                                s_in = gr.Gallery(label="In this subset: Mooneys (click to remove)", columns=4, height=270, object_fit="contain",
+                                                  allow_preview=False)
+                                s_orig = gr.Gallery(label="In this subset: originals", columns=4, height=270, object_fit="contain", allow_preview=False)
+                        with gr.Row():
+                            s_save = gr.Button("Save subset", variant="primary", scale=2)
+                            s_active = gr.Checkbox(True, label="Make it the project's subset (written to Subset/ as well)", scale=2)
+                            s_fill = gr.Button("Fill up from favourites", scale=1)
+                            s_del = gr.Button("Delete this subset", scale=1)
+                        s_msg = gr.Markdown(elem_classes="hint")
+                        gr.Markdown("Each saved subset is a folder `Subsets/<name>/` with `Original/` and `Mooney/`. The project's subset is "
+                                    "also in `Subset/`: the counter at the top shows it. Subsets can be chosen wherever a step runs on part "
+                                    "of the photos (system 2, 3D datasets).", elem_classes="hint")
 
-        # ------------------------------------------------------------------ Mooney
-        with gr.Tab("Mooney"):
-            gr.Markdown("Look at one photo at a time and see the four phases. Move the sliders to adjust it by hand, then **Save this Mooney**. "
-                        "A change affects this photo only, and only when you save it; another photo always opens with its own saved "
-                        "values. Mark the best ones with the star; they become the subset of ten.", elem_classes="lead")
-            with gr.Row():
-                with gr.Column(scale=1, min_width=330):
-                    lab_src = gr.Radio(list(LAB_SOURCES), value="Original", label="Photos from")
-                    lab_file = gr.Dropdown(choices=[], label="Photo", interactive=True)
-                    with gr.Row():
-                        lab_prev = gr.Button("← Previous", size="sm", min_width=80)
-                        lab_pos = gr.HTML("", min_width=60)
-                        lab_next = gr.Button("Next →", size="sm", min_width=80)
-                    inp = gr.Image(type="pil", label="Photo", height=230)
-                    sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (pixels)")
-                    white = gr.Slider(1, 99, value=_st["white"], step=0.5, label="White (% of the face)")
-                    bg_mode = gr.Radio(["black", "white", "auto"], value=_st["bg_mode"], label="Background of the Mooney")
-                    with gr.Accordion("More settings", open=False):
-                        bg_level = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray")
-                        separate = gr.Checkbox(_st["separate"], label="Separate the background (U²-Net)")
-                        preprocess = gr.Radio(["none", "clahe"], value=_st["preprocess"], label="Preprocessing before the blur")
-                        manual = gr.Checkbox(False, label="Set the threshold by hand (ignores the white share)")
-                        thr = gr.Slider(0, 255, value=128, step=1, label="Threshold", visible=False)
-                    with gr.Row():
-                        lab_save = gr.Button("Save this Mooney", variant="primary", size="sm", min_width=120)
-                        lab_fav = gr.Button("☆ Favourite", size="sm", min_width=90)
-                        lab_default = gr.Button("Back to defaults", size="sm", min_width=110)
-                    info = gr.Markdown(elem_classes="hint")
-                    lab_msg = gr.Markdown(elem_classes="hint")
-                with gr.Column(scale=3):
-                    with gr.Row():
-                        out_sep = gr.Image(label="Phase 1   background separated")
-                        out_gray = gr.Image(label="Phase 2   grayscale")
-                    with gr.Row():
-                        out_blur = gr.Image(label="Phase 3   Gaussian blur")
-                        out_moon = gr.Image(label="Phase 4   Mooney", format="png")
-                    with gr.Accordion("Favourites", open=False):
-                        fav_gal = gr.Gallery(fav_gallery(), columns=10, height=150, object_fit="contain", allow_preview=False)
+                    # -------------------------------------------------------------- 3D datasets
+                    with gr.Tab("3D datasets") as tab_3d:
+                        gr.Markdown("Make a dataset of 3D faces: pictures of faces drawn under light directions we choose, and their Mooneys. "
+                                    "For these pictures the light and the depth of every pixel are known, so the depth systems can be checked "
+                                    "against the truth. This page only makes the dataset; the systems run on it in **Experiments → Vision "
+                                    "systems**, and the comparison with the truth is in **Analysis → 3D comparison**.", elem_classes="lead")
+                        d_source = gr.Radio(list(D3_SOURCES), value=list(D3_SOURCES)[0], label="Source of the 3D faces",
+                                            info="Reconstructed faces go to 3D/, fitted Basel faces to 3D_basel_fit/, invented faces to 3D_basel/. "
+                                                 "Each source has one live folder; the sets are kept side by side.")
+                        d_caveat = gr.Markdown(D3_LEAD[f3.SUB] + " " + a3.caveat(f3.SUB) + " Strongly turned heads are skipped, because this simple "
+                                               "mesh breaks for them.", elem_classes="hint")
+                        with gr.Column(visible=True) as d_box_photos:
+                            with gr.Row():
+                                d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="Take the photos from", scale=2)
+                                d_suggest = gr.Button("Fill in again", size="sm", scale=0, min_width=120)
+                            d_files = gr.Dropdown(choices=images_in("Original"), value=a3.default_photos(PROJECT_ROOT), multiselect=True,
+                                                  label="Photos to turn into 3D faces (you can still add or remove single photos)")
+                        with gr.Column(visible=False) as d_box_basel:
+                            d_model_note = gr.Markdown(basel_note(), elem_classes="hint")
+                            d_fit_pose = gr.Radio(FIT_POSES, value=FIT_POSES[0], label="Head pose of the fitted head", visible=False,
+                                                  info="Frontal: comparable with the invented faces. As in the photo: the pose found by the fit.")
+                            with gr.Row():
+                                d_n = gr.Slider(1, 50, value=cfg.BASEL_FACES, step=1, label="Number of invented faces",
+                                                info="Seeds 1, 2, 3, …: the same number always gives the same face.")
+                                d_model = gr.Radio(list(BASEL_MODELS), value="Whole head", label="Model file",
+                                                   info="Whole head: with ears, neck and skull. Face only: the face region.")
+                            with gr.Row():
+                                d_poses = gr.CheckboxGroup(list(bfm.POSES), value=["frontal"], label="Head pose",
+                                                           info="Left and right as seen by the viewer. Every chosen pose is drawn for every face.")
+                                d_shadows = gr.Checkbox(value=cfg.BASEL_SHADOWS, label="Cast shadows",
+                                                        info="Parts of the face shade other parts, for example the nose the cheek.")
+                        d_lights = gr.CheckboxGroup(list(f3.LIGHTS), value=[l for l in cfg.LIGHTS_3D if l in f3.LIGHTS], label="Light directions")
+                        with gr.Row():
+                            d_b1 = gr.Button("Render", size="md")
+                            d_b2 = gr.Button("Make Mooneys", size="md")
+                            d_all = gr.Button("Render and make Mooneys", variant="primary", size="md")
+                            d_stop = gr.Button("Stop", variant="stop", size="md", scale=0, min_width=80)
+                        gr.Markdown("The buttons work on the source chosen above. *Render* replaces the earlier renders of that source together "
+                                    "with their Mooneys and results, so save the dataset below first if you want to keep it. *Make Mooneys* uses "
+                                    "the values saved as defaults in Mooney → Batch and removes earlier system results of this 3D set.",
+                                    elem_classes="hint")
+                        d_state = gr.Markdown(elem_classes="hint")
+                        d_log = gr.Textbox(label="Log", lines=9, max_lines=9, interactive=False, autoscroll=True, elem_classes="log")
+                        d_gal_o = gr.Gallery(label="3D/Original/   the renders", columns=10, height=250, object_fit="contain", allow_preview=False)
+                        d_gal_m = gr.Gallery(label="3D/Mooney/   their Mooneys", columns=10, height=250, object_fit="contain", allow_preview=False)
+                        gr.Markdown("### Saved 3D datasets\n<span class='hint'>A saved 3D dataset is a named copy of the live folder of a source: "
+                                    "renders, true depth, Mooneys and any system results it has. *Load* puts a saved one back as the live folder of "
+                                    "its source, so the systems and the analysis work on it.</span>", elem_classes="prose")
+                        with gr.Row():
+                            d_set_name = gr.Textbox("", label="Save the 3D dataset of the source chosen above as…", max_lines=1, scale=3,
+                                                    placeholder="for example: basel 50 faces")
+                            d_set_save = gr.Button("Save 3D dataset", scale=1)
+                        d_set_table = gr.Dataframe(headers=D3_SET_COLS, interactive=False, wrap=True)
+                        with gr.Row():
+                            d_set_pick = gr.Dropdown(choices=d3_set_choices(), label="A saved 3D dataset", scale=3)
+                            d_set_load = gr.Button("Load", scale=1)
+                            d_set_del = gr.Button("Delete", variant="stop", scale=1)
+                        d_set_msg = gr.Markdown(elem_classes="hint")
 
-        # ------------------------------------------------------------------ Subset
-        with gr.Tab("Subset") as tab_subset:
-            gr.Markdown("Choose the pairs that go into a subset. Click a Mooney on the left to add it, click it again or click it on the "
-                        "right to take it out, then **Save**. A subset has a name and a size; you can keep several.", elem_classes="lead")
-            _sub0 = load_subsets()
-            _sub_name = _sub0["active"] or (sorted(_sub0["sets"])[0] if _sub0["sets"] else "main")
-            with gr.Row():
-                s_pick = gr.Dropdown(choices=sorted(_sub0["sets"]), value=_sub_name if _sub_name in _sub0["sets"] else None, scale=2,
-                                     label="Open a saved subset")
-                s_name = gr.Textbox(_sub_name, label="Name (a new name saves a new subset)", max_lines=1, scale=2)
-                s_size = gr.Number(_sub0["sets"].get(_sub_name, {}).get("size", TARGET_SUBSET), label="Size", precision=0, minimum=1,
-                                   maximum=500, scale=1, min_width=90)
-                s_show = gr.Radio(SUBSET_SHOW, value=SUBSET_SHOW[0], label="Show", scale=2)
-            s_line = gr.Markdown(elem_classes="prose")
-            s_chosen = gr.State([])
-            with gr.Row():
-                with gr.Column(scale=3):
-                    s_cand = gr.Gallery(label="Click to add or remove   ✓ = in the subset", columns=6, height=560, object_fit="contain",
-                                        allow_preview=False)
-                with gr.Column(scale=2):
-                    s_in = gr.Gallery(label="In this subset: Mooneys (click to remove)", columns=4, height=270, object_fit="contain",
-                                      allow_preview=False)
-                    s_orig = gr.Gallery(label="In this subset: originals", columns=4, height=270, object_fit="contain", allow_preview=False)
-            with gr.Row():
-                s_save = gr.Button("Save subset", variant="primary", scale=2)
-                s_active = gr.Checkbox(True, label="Make it the project's subset (written to Subset/ as well)", scale=2)
-                s_fill = gr.Button("Fill up from favourites", scale=1)
-                s_del = gr.Button("Delete this subset", scale=1)
-            s_msg = gr.Markdown(elem_classes="hint")
-            gr.Markdown("Each saved subset is a folder `Subsets/<name>/` with `Original/` and `Mooney/`. The project's subset is "
-                        "also in `Subset/`: the vision-language model runs on it, and the counter at the top shows it.", elem_classes="hint")
+            # ================================================================== Mooney
+            with gr.Column(visible=False) as sec_mooney:
+                pg_mooney = gr.State("Batch")
+                with gr.Tabs():
+                    # -------------------------------------------------------------- Batch
+                    with gr.Tab("Batch") as tab_batch:
+                        gr.Markdown("Make a Mooney for every photo with one set of values. The values below are the project defaults; "
+                                    "afterwards you can adjust single photos in **By hand**, and Batch will leave those alone.", elem_classes="lead")
+                        with gr.Row():
+                            b_sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.5, label="Blur σ (pixels, at 512 px)")
+                            b_white = gr.Slider(1, 99, value=_st["white"], step=1, label="White (% of the face)")
+                            b_bgm = gr.Radio(["black", "white", "auto"], value=_st["bg_mode"], label="Background of the Mooney")
+                            b_bgl = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray (changes only the outline of the person)")
+                        with gr.Accordion("Optional settings (off or at their default unless you change them)", open=False):
+                            with gr.Row():
+                                b_rule = gr.Radio(list(RULES), value=RULE_LABEL[_st["white_rule"]], label="White share")
+                                b_bw = gr.Slider(1, 99, value=_st["bright_white"], step=1, label="White for bright faces (%)")
+                                b_bb = gr.Slider(60, 200, value=_st["bright_border"], step=1, label="A face is bright from brightness")
+                            gr.Markdown("*By face brightness* gives bright, evenly lit faces more white, because at a small white share they tend "
+                                        "to break into fragments. It depends partly on skin tone, so say so if you use it.", elem_classes="hint")
+                            with gr.Row():
+                                b_pre = gr.Radio(["none", "clahe"], value=_st["preprocess"], label="Preprocessing before the blur")
+                                b_measure = gr.Radio(["Face", "Whole person"], value="Face", label="White share is counted on")
+                                b_sep = gr.Checkbox(_st["separate"], label="Separate the background (U²-Net)")
+                                b_keep = gr.Checkbox(True, label="Keep Mooneys adjusted by hand")
+                                b_src = gr.Radio(["Original", "Raw"], value="Original", label="Source folder")
+                            with gr.Row():
+                                b_sweep = gr.Checkbox(False, label="Sweep: try several values per photo and keep the best-scoring one")
+                                b_sig = gr.CheckboxGroup(["3", "4", "6", "8"], value=["4", "6"], label="Blur values to try")
+                                b_wht = gr.CheckboxGroup(["20", "22", "25", "28", "30", "35"], value=["20", "25"], label="White shares to try (%)")
+                        with gr.Row():
+                            b_run = gr.Button("Generate all Mooneys", variant="primary", size="md", scale=2)
+                            b_stop = gr.Button("Stop", variant="stop", size="md", scale=0, min_width=80)
+                            b_save_def = gr.Button("Save these values as defaults", size="md", scale=1)
+                        b_log = gr.Textbox(label="Log", lines=9, max_lines=9, interactive=False, autoscroll=True, elem_classes="log")
+                        b_favs = gr.Textbox(fav_text(), label="Favourites (click a Mooney below to add or remove it; choose a subset from them in Dataset → Subsets)",
+                                            interactive=False)
+                        b_gal = gr.Gallery(gallery_of("Mooney"), label="Mooney/", columns=10, height=420, object_fit="contain", allow_preview=False)
+                        with gr.Accordion("params.csv (every value used, per photo)", open=False):
+                            b_tab = gr.Dataframe(params_table(), headers=PARAM_COLS, interactive=False, wrap=True)
 
-        # ------------------------------------------------------------------ Vision systems
-        with gr.Tab("Vision systems") as tab_vision:
-            gr.Markdown("Each system takes every original and its Mooney and returns values for both. One result file per image goes to "
-                        "`ResultN/Original` and `ResultN/Mooney`, and a table per system to `analysis/`.", elem_classes="lead")
-            v_check = gr.Button("Check which systems are ready", size="sm", scale=0)
-            with gr.Row(elem_classes="system"):
-                gr.Markdown("**1 · Face model**   YuNet detector and SFace embedding (OpenCV)  \n"
-                            "<span class='hint'>Is a face detected? How similar is the Mooney's embedding to its original's? "
-                            "The same again for the Mooney blurred once more.</span>", scale=3)
-                v_s1 = gr.Textbox(_vs["face"], label="Status", interactive=False, scale=2)
-                v_run1 = gr.Button("Run", variant="primary", size="sm", scale=1)
-            with gr.Row(elem_classes="system"):
-                gr.Markdown("**2 · Vision-language model**   a local model through Ollama, same prompt for every image, temperature 0  \n"
-                            "<span class='hint'>Does it say a face is present? Head pose, light direction and a one-sentence description.</span>", scale=3)
-                v_s2 = gr.Textbox(_vs["vlm"], label="Status", interactive=False, scale=2)
-                v_run2 = gr.Button("Run", variant="primary", size="sm", scale=1)
-            with gr.Row():
-                v_model = gr.Dropdown(choices=_vs["vlm_models"], value=pick_model(_vs["vlm_models"]),
-                                      label="Ollama model", allow_custom_value=True, scale=1)
-                v_prompt = gr.Textbox(vs.VLM_PROMPT, label="Prompt (saved with the results)", lines=3, scale=3)
-            with gr.Row():
-                v_scope = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="Run system 2 on", scale=1)
-                gr.Markdown("This model is heavy: about 5 GB of memory and several seconds per image, so all photos keep the laptop busy "
-                            "for a long time. Choose a subset or your favourites. Systems 1, 3 and 4 are light and always run on every "
-                            "photo, so their tables stay complete.", elem_classes="hint", scale=3)
-            with gr.Row(elem_classes="system"):
-                gr.Markdown("**3 · Learned depth**   Depth Anything V2, ViT-S: a neural network trained on millions of images  \n"
-                            "<span class='hint'>A depth map for each image, and how well the Mooney's depth map matches its original's.</span>", scale=3)
-                v_s3 = gr.Textbox(_vs["depth"], label="Status", interactive=False, scale=2)
-                v_run3 = gr.Button("Run", variant="primary", size="sm", scale=1)
-            with gr.Row(elem_classes="system"):
-                gr.Markdown("**4 · Depth from shading**   shape from shading after Tsai & Shah (1994): a formula, nothing learned  \n"
-                            "<span class='hint'>The same two values as system 3, from a model that assumes a matte surface and light from above "
-                            "and knows nothing about faces.</span>", scale=3)
-                v_s4 = gr.Textbox(_vs["shading"], label="Status", interactive=False, scale=2)
-                v_run4 = gr.Button("Run", variant="primary", size="sm", scale=1)
-            v_log = gr.Textbox(label="Log", lines=12, max_lines=12, interactive=False, autoscroll=True, elem_classes="log")
-            with gr.Accordion("Where every value comes from: model output, our settings, what we calculate", open=False):
-                gr.Markdown(read_doc("VISION_SYSTEMS.md", "_docs/VISION_SYSTEMS.md is missing._"), elem_classes="prose")
-            with gr.Accordion("Later steps (off by default)", open=False):
-                v_identify = gr.Checkbox(False, label="Identity matching: also test whether systems 1 and 2 recognise the person "
-                                                      "(system 1 ranks against the other photos; system 2 is asked for the name)")
-                v_src = gr.Radio(["Original", "Raw"], value="Original", label="Source folder")
-                with gr.Row(elem_classes="system"):
-                    gr.Markdown("**5 · 3D face mesh**   MediaPipe Face Landmarker, 478 3D landmarks  \n"
-                                "<span class='hint'>Is a mesh obtained, and how close is it to the original's mesh? Writes to Result5/. "
-                                "The controlled 3D experiment is in tab 6.</span>", scale=3)
-                    v_s5 = gr.Textbox(_vs["mesh"], label="Status", interactive=False, scale=2)
-                    v_run5 = gr.Button("Run", size="sm", scale=1)
+                    # -------------------------------------------------------------- By hand
+                    with gr.Tab("By hand") as tab_lab:
+                        gr.Markdown("Look at one photo at a time and see the four phases. Move the sliders to adjust it by hand, then **Save this Mooney**. "
+                                    "A change affects this photo only, and only when you save it; another photo always opens with its own saved "
+                                    "values. Mark the best ones with the star; choose a subset from them in **Dataset → Subsets**.", elem_classes="lead")
+                        with gr.Row():
+                            with gr.Column(scale=1, min_width=330):
+                                lab_src = gr.Radio(list(LAB_SOURCES), value="Original", label="Photos from")
+                                lab_file = gr.Dropdown(choices=[], label="Photo", interactive=True)
+                                with gr.Row():
+                                    lab_prev = gr.Button("← Previous", size="sm", min_width=80)
+                                    lab_pos = gr.HTML("", min_width=60)
+                                    lab_next = gr.Button("Next →", size="sm", min_width=80)
+                                inp = gr.Image(type="pil", label="Photo", height=230)
+                                sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (pixels)")
+                                white = gr.Slider(1, 99, value=_st["white"], step=0.5, label="White (% of the face)")
+                                bg_mode = gr.Radio(["black", "white", "auto"], value=_st["bg_mode"], label="Background of the Mooney")
+                                with gr.Accordion("More settings", open=False):
+                                    bg_level = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray")
+                                    separate = gr.Checkbox(_st["separate"], label="Separate the background (U²-Net)")
+                                    preprocess = gr.Radio(["none", "clahe"], value=_st["preprocess"], label="Preprocessing before the blur")
+                                    manual = gr.Checkbox(False, label="Set the threshold by hand (ignores the white share)")
+                                    thr = gr.Slider(0, 255, value=128, step=1, label="Threshold", visible=False)
+                                with gr.Row():
+                                    lab_save = gr.Button("Save this Mooney", variant="primary", size="sm", min_width=120)
+                                    lab_fav = gr.Button("☆ Favourite", size="sm", min_width=90)
+                                    lab_default = gr.Button("Back to defaults", size="sm", min_width=110)
+                                info = gr.Markdown(elem_classes="hint")
+                                lab_msg = gr.Markdown(elem_classes="hint")
+                            with gr.Column(scale=3):
+                                with gr.Row():
+                                    out_sep = gr.Image(label="Phase 1   background separated")
+                                    out_gray = gr.Image(label="Phase 2   grayscale")
+                                with gr.Row():
+                                    out_blur = gr.Image(label="Phase 3   Gaussian blur")
+                                    out_moon = gr.Image(label="Phase 4   Mooney", format="png")
+                                with gr.Accordion("Favourites", open=False):
+                                    fav_gal = gr.Gallery(fav_gallery(), columns=10, height=150, object_fit="contain", allow_preview=False)
 
-        # ------------------------------------------------------------------ Results
-        with gr.Tab("Results"):
-            gr.Markdown("What the vision systems returned, for the originals and for the Mooneys. Nothing is computed here; "
-                        "press **Refresh** after running a system.", elem_classes="lead")
-            with gr.Row():
-                r_refresh = gr.Button("Refresh", variant="primary", size="sm", scale=0)
-                r_export = gr.Button("Export figures to figures/", size="sm", scale=0)
-                r_msg = gr.Markdown(elem_classes="hint")
-            r_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
-            r_fig = gr.Image(show_label=False, height=380)
-            with gr.Row():
-                r_stem = gr.Dropdown(choices=[], label="Photo", scale=3)
-                r_prev = gr.Button("← Previous", size="sm", scale=1)
-                r_next = gr.Button("Next →", size="sm", scale=1)
-            r_panel = gr.Image(label="Original and Mooney with each system's output", height=520)
-            r_detail = gr.Markdown(elem_classes="prose")
-            gr.Markdown("<span class='hint'>To keep this state under a name, use the **Run** tab. Saved runs can be compared "
-                        "in **Analysis**.</span>", elem_classes="prose")
+            # ================================================================== Experiments
+            with gr.Column(visible=False) as sec_exp:
+                pg_exp = gr.State("Vision systems")
+                with gr.Tabs():
+                    # -------------------------------------------------------------- Vision systems
+                    with gr.Tab("Vision systems") as tab_vision:
+                        gr.Markdown("Run vision systems on a dataset. Each system takes every original (or render) and its Mooney and returns values "
+                                    "for both: one result file per image in `ResultN/Original` and `ResultN/Mooney`, and a table per system in "
+                                    "`analysis/`. A 3D dataset appears here once it has Mooneys.", elem_classes="lead")
+                        with gr.Row():
+                            v_data = gr.Radio(v_datasets(), value=V_PHOTOS, label="Run on", scale=2)
+                            v_ticks = gr.CheckboxGroup(V_SYSTEMS, value=V_3D, label="Systems to run", scale=3)
+                        gr.Markdown("**1** YuNet detector and SFace embedding: is a face found, and how similar is the Mooney to its original? · "
+                                    "**2** a local vision-language model through Ollama: face present, head pose, light direction, description · "
+                                    "**3** Depth Anything V2: a learned depth map · **4** shape from shading (Tsai & Shah 1994): depth from a "
+                                    "formula · **5** MediaPipe face mesh. On a 3D dataset, systems 1, 3 and 4 run and the depth maps are "
+                                    "compared with the true depth. Every value is explained in **Docs → Vision systems**.", elem_classes="hint")
+                        with gr.Row():
+                            v_go = gr.Button("Run the ticked systems", variant="primary", scale=6)
+                            v_stop = gr.Button("Stop", variant="stop", scale=1, min_width=80)
+                        v_log = gr.Textbox(label="Log", lines=11, max_lines=11, interactive=False, autoscroll=True, elem_classes="log")
+                        gr.Markdown("### Results of this dataset", elem_classes="prose")
+                        v_line = gr.Markdown(elem_classes="hint")
+                        v_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
+                        v_fig = gr.Image(show_label=False, height=380)
+                        gr.Markdown("### Save this state as a run\n<span class='hint'>A run is a frozen copy of the Mooneys, their values and the "
+                                    "results under a name, in the runs folder. Saved runs are listed in **Saved runs** and compared in "
+                                    "**Analysis → Compare runs**.</span>", elem_classes="prose")
+                        with gr.Row():
+                            v_run_name = gr.Textbox("", label="Save run as…", placeholder="for example: final run", scale=2, max_lines=1)
+                            v_run_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=3, max_lines=1)
+                            v_run_save = gr.Button("Save run", scale=1)
+                        v_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
+                                                  label="The saved run includes, besides the Mooneys and their values")
+                        v_run_msg = gr.Markdown(elem_classes="hint")
+                        with gr.Accordion("Settings of the systems", open=False):
+                            v_check = gr.Button("Check which systems are ready", size="sm", scale=0)
+                            with gr.Row():
+                                v_s1 = gr.Textbox(_vs["face"], label="1 Face model", interactive=False)
+                                v_s2 = gr.Textbox(_vs["vlm"], label="2 Vision-language model", interactive=False)
+                                v_s3 = gr.Textbox(_vs["depth"], label="3 Learned depth", interactive=False)
+                                v_s4 = gr.Textbox(_vs["shading"], label="4 Depth from shading", interactive=False)
+                                v_s5 = gr.Textbox(_vs["mesh"], label="5 3D face mesh", interactive=False)
+                            gr.Markdown("**System 2 needs Ollama**, a separate program that serves the vision-language model on this "
+                                        "computer.", elem_classes="hint")
+                            o_line = gr.Markdown(ollama_status(), elem_classes="hint")
+                            with gr.Row():
+                                o_check = gr.Button("Check", size="sm", scale=0, min_width=90)
+                                o_start = gr.Button("Start Ollama", size="sm", scale=0, min_width=130)
+                                o_name = gr.Textbox(cfg.OLLAMA_MODEL, label="Model to download", max_lines=1, scale=2)
+                                o_pull = gr.Button("Download this model", size="sm", scale=0, min_width=170)
+                            gr.Markdown("*Download* shows its progress in the log above and can be stopped with the Stop button. "
+                                        "A stopped download continues where it was when you start it again.", elem_classes="hint")
+                            with gr.Row():
+                                v_model = gr.Dropdown(choices=_vs["vlm_models"], value=pick_model(_vs["vlm_models"]),
+                                                      label="System 2: Ollama model", allow_custom_value=True, scale=1)
+                                v_prompt = gr.Textbox(vs.VLM_PROMPT, label="System 2: prompt (saved with the results)", lines=3, scale=3)
+                            with gr.Row():
+                                v_scope = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=1)
+                                gr.Markdown("System 2 is heavy: about 5 GB of memory and several seconds per image, so all photos keep the laptop busy "
+                                            "for a long time. Choose a subset or your favourites. Systems 1, 3 and 4 are light and always run on every "
+                                            "photo, so their tables stay complete.", elem_classes="hint", scale=3)
+                            v_identify = gr.Checkbox(False, label="Identity matching (a later step): also test whether systems 1 and 2 recognise the "
+                                                                  "person (system 1 ranks against the other photos; system 2 is asked for the name)")
+                            v_src = gr.Radio(["Original", "Raw"], value="Original", label="Source folder of the photos")
 
-        # ------------------------------------------------------------------ Analysis
-        with gr.Tab("Analysis") as tab_analysis:
-            gr.Markdown("How the results relate to the photos. Each photo is one data point: its brightness, head turn and Mooney settings on one "
-                        "side, what each vision system returned on the other. Nothing is computed by a model here; the tab only reads the "
-                        "result tables. Press **Refresh** after running a system.", elem_classes="lead")
-            with gr.Row():
-                a_refresh = gr.Button("Refresh", variant="primary", size="sm", scale=0)
-                a_export = gr.Button("Export analysis to figures/", size="sm", scale=0)
-                a_msg = gr.Markdown(elem_classes="hint")
-            gr.Markdown("### The dataset", elem_classes="prose")
-            with gr.Row():
-                a_ds_table = gr.Dataframe(headers=["", "count"], interactive=False, scale=1, label="What the dataset holds")
-                a_ds_fig = gr.Image(show_label=False, scale=3)
-            gr.Markdown("### Each system: original versus Mooney\n<span class='hint'>One bar chart or histogram per value. A histogram shows how many "
-                        "photos fall into each range; the dashed line is the mean.</span>", elem_classes="prose")
-            a_sys_fig = gr.Image(show_label=False)
-            gr.Markdown("### By group", elem_classes="prose")
-            a_by = gr.Radio(list(an.GROUPINGS), value="Face brightness", label="Group the photos by")
-            gr.Markdown("Face brightness: three equally large groups by the mean gray value of the face. Head turn: frontal, slightly turned, strongly "
-                        "turned, from the position of the nose between the eyes. Groups with fewer than 10 photos are marked, because their "
-                        "percentages are unreliable.", elem_classes="hint")
-            a_grp_table = gr.Dataframe(interactive=False, wrap=True, label="One row per group; every value with the number of photos behind it")
-            a_grp_fig = gr.Image(show_label=False)
-            gr.Markdown("### Do the systems agree?\n<span class='hint'>Correlation across photos between two results: +1 means the same photos score "
-                        "high on both, 0 means no relation, -1 means the opposite. Yes/no results count as 1 and 0.</span>", elem_classes="prose")
-            with gr.Row():
-                a_agree_table = gr.Dataframe(headers=["result A", "result B", "correlation", "photos"], interactive=False, scale=3,
-                                             label="Strongest relation first")
-                a_agree_fig = gr.Image(show_label=False, scale=2)
-            gr.Markdown("### Hardest and easiest photos\n<span class='hint'>Ranked by the average of the photo's rank on every available result "
-                        "(similarity, similarity after re-blurring, both depth matches, face found after re-blurring, language model says face). "
-                        "Hard and easy for the models, not for people.</span>", elem_classes="prose")
-            a_hard = gr.Gallery(label="Hardest for the systems", columns=8, height=190, object_fit="contain")
-            a_easy = gr.Gallery(label="Easiest for the systems", columns=8, height=190, object_fit="contain")
-            a_rank = gr.Dataframe(headers=an.RANK_COLS, interactive=False, label="The values behind the two rows of pictures")
-            gr.Markdown("### In words", elem_classes="prose")
-            a_words = gr.Markdown(elem_classes="prose")
-            gr.Markdown("### Compare runs\n<span class='hint'>Runs are saved in Results. *current* is the project as it is now. "
-                        "The first table is the Results summary with one column per run; the second shows what each run was made with.</span>",
-                        elem_classes="prose")
-            c_runs = gr.Dropdown(choices=run_choices(), value=[], multiselect=True, label="Runs to put side by side")
-            c_msg = gr.Markdown(elem_classes="hint")
-            c_table = gr.Dataframe(interactive=False, wrap=True, label="Results, one column per run")
-            c_settings = gr.Dataframe(interactive=False, wrap=True, label="What each run's Mooneys were made with (from its params.csv)")
+                    # -------------------------------------------------------------- One-button run
+                    with gr.Tab("One-button run") as tab_run:
+                        gr.Markdown("One full run with one button. Give it a name, tick the steps and set their values, then press **Run**, or "
+                                    "**Add to queue** to let several runs go one after another. Every step does exactly what its own page "
+                                    "does, in this order; the log shows where it is. At the end the run is saved under its name and date.",
+                                    elem_classes="lead")
+                        with gr.Row():
+                            p_name = gr.Textbox("", label="Name of the run", placeholder="for example: final run", scale=2, max_lines=1)
+                            p_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=3, max_lines=1,
+                                                placeholder="for example: blur 6, 23 % white, 22 Mooneys adjusted by hand")
+                        with gr.Group():
+                            p_batch = gr.Checkbox(True, label="Step 1 · Make the Mooneys (same as Batch; Mooneys adjusted by hand are kept)")
+                            with gr.Row():
+                                p_sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (px)")
+                                p_white = gr.Slider(5, 60, value=_st["white"], step=0.5, label="White share of the face (%)")
+                                p_bg = gr.Radio(["black", "white"], value=_st["bg_mode"] if _st["bg_mode"] in ("black", "white") else "black",
+                                                label="Background of the Mooney")
+                                p_bgl = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray")
+                        with gr.Row():
+                            p_systems = gr.CheckboxGroup(PIPE_SYSTEMS, value=[PIPE_SYSTEMS[0], PIPE_SYSTEMS[2], PIPE_SYSTEMS[3]],
+                                                         label="Step 2 · Vision systems, on every original and every Mooney", scale=3)
+                        with gr.Row():
+                            p_3d = gr.CheckboxGroup(list(D3_SOURCES), value=[], scale=3,
+                                                    label="Step 3 · 3D faces: render, make Mooneys, run systems 1, 3 and 4 against the true depth")
+                            p_faces = gr.Slider(2, 30, value=cfg.BASEL_FACES, step=1, label="Basel faces", scale=1)
+                        with gr.Row():
+                            p_vlm_set = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=1)
+                            p_3d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="Reconstructed 3D uses", scale=1)
+                            p_fit_set = gr.Dropdown(photo_set_choices(), value=fit_default_set(), label="Basel fitted 3D uses", scale=1)
+                        with gr.Row():
+                            p_export = gr.Checkbox(True, label="Step 4 · Export figures", scale=1)
+                            p_save = gr.Checkbox(True, label="Step 5 · Save the run under its name", scale=1)
+                            p_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
+                                                      label="The saved run includes, besides the Mooneys and their values", scale=3)
+                        gr.Markdown("The two photo-based 3D sources use the chosen photos and the five default lights; the fitted heads are drawn "
+                                    "frontal with cast shadows. Invented Basel faces are whole heads, frontal, with cast shadows. For other "
+                                    "choices use **Dataset → 3D datasets**. Other Batch options (white rule, preprocessing) are taken from the "
+                                    "saved defaults.", elem_classes="hint")
+                        with gr.Row():
+                            p_run = gr.Button("Run", variant="primary", scale=2)
+                            p_stop = gr.Button("Stop", variant="stop", scale=0, min_width=80)
+                            p_queue = gr.Button("Add to queue", scale=1)
+                            p_only = gr.Button("Only save the current state as a run", scale=1)
+                        p_msg = gr.Markdown(elem_classes="hint")
+                        p_log = gr.Textbox(label="Log", lines=12, max_lines=12, interactive=False, autoscroll=True, elem_classes="log")
+                        gr.Markdown("### Results of the current state", elem_classes="prose")
+                        p_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
+                        p_fig = gr.Image(show_label=False, height=380)
+                        p_cmp = gr.Dataframe(interactive=False, wrap=True, max_height=520, label="Photos and 3D sets side by side (empty until a 3D step has run)")
 
-        # ------------------------------------------------------------------ 3D faces
-        with gr.Tab("3D faces") as tab_3d:
-            gr.Markdown("A controlled version of the experiment: pictures of 3D faces drawn under light directions we choose. For these "
-                        "pictures the light and the depth of every pixel are known, so the depth systems can be checked against the "
-                        "truth, for the render and for its Mooney. The renders go through the same Mooney generator and the same "
-                        "systems as the photos. Each source of 3D faces has its own folder with the same layout as the project.",
-                        elem_classes="lead")
-            d_source = gr.Radio(list(D3_SOURCES), value=list(D3_SOURCES)[0], label="Source of the 3D faces",
-                                info="Reconstructed faces go to 3D/, fitted Basel faces to 3D_basel_fit/, invented faces to 3D_basel/. "
-                                     "The sets are kept side by side.")
-            d_caveat = gr.Markdown(D3_LEAD[f3.SUB] + " " + a3.caveat(f3.SUB) + " Strongly turned heads are skipped, because this simple "
-                                   "mesh breaks for them.", elem_classes="hint")
-            with gr.Column(visible=True) as d_box_photos:
-                with gr.Row():
-                    d_set = gr.Dropdown(photo_set_choices(suggest=True), value=SET_SUGGEST, label="Take the photos from", scale=2)
-                    d_suggest = gr.Button("Fill in again", size="sm", scale=0, min_width=120)
-                d_files = gr.Dropdown(choices=images_in("Original"), value=a3.default_photos(PROJECT_ROOT), multiselect=True,
-                                      label="Photos to turn into 3D faces (you can still add or remove single photos)")
-            with gr.Column(visible=False) as d_box_basel:
-                d_model_note = gr.Markdown(basel_note(), elem_classes="hint")
-                d_fit_pose = gr.Radio(FIT_POSES, value=FIT_POSES[0], label="Head pose of the fitted head", visible=False,
-                                      info="Frontal: comparable with the invented faces. As in the photo: the pose found by the fit.")
-                with gr.Row():
-                    d_n = gr.Slider(1, 50, value=cfg.BASEL_FACES, step=1, label="Number of invented faces",
-                                    info="Seeds 1, 2, 3, …: the same number always gives the same face.")
-                    d_model = gr.Radio(list(BASEL_MODELS), value="Whole head", label="Model file",
-                                       info="Whole head: with ears, neck and skull. Face only: the face region.")
-                with gr.Row():
-                    d_poses = gr.CheckboxGroup(list(bfm.POSES), value=["frontal"], label="Head pose",
-                                               info="Left and right as seen by the viewer. Every chosen pose is drawn for every face.")
-                    d_shadows = gr.Checkbox(value=cfg.BASEL_SHADOWS, label="Cast shadows",
-                                            info="Parts of the face shade other parts, for example the nose the cheek.")
-            d_lights = gr.CheckboxGroup(list(f3.LIGHTS), value=[l for l in cfg.LIGHTS_3D if l in f3.LIGHTS], label="Light directions")
-            with gr.Row():
-                d_b1 = gr.Button("1 Render", size="md")
-                d_b2 = gr.Button("2 Make Mooneys", size="md")
-                d_b3 = gr.Button("3 Run systems 1, 3 and 4", size="md")
-                d_all = gr.Button("Run all three steps", variant="primary", size="md")
-            gr.Markdown("The buttons work on the source chosen above. *1 Render* replaces the earlier renders of that source together "
-                        "with their Mooneys and results. *2 Make Mooneys* uses the values saved as defaults in Batch and removes "
-                        "earlier results of step 3. *3* runs the face model and both depth systems and compares them with the truth.",
-                        elem_classes="hint")
-            d_state = gr.Markdown(elem_classes="hint")
-            d_log = gr.Textbox(label="Log", lines=10, max_lines=10, interactive=False, autoscroll=True, elem_classes="log")
-            gr.Markdown("### By light direction\n<span class='hint'>n = renders in the row. *Face found* counts images. Similarity is the "
-                        "face model's (−1 to 1). *Depth vs truth* is the correlation, inside the face, between a system's depth map and "
-                        "the depth the render was drawn from: 1 = the same relief, 0 = unrelated.</span>", elem_classes="prose")
-            d_table = gr.Dataframe(headers=a3.HEADERS, interactive=False, wrap=True, label="One row per light direction")
-            d_fig = gr.Image(show_label=False)
-            gr.Markdown("### One face under every light", elem_classes="prose")
-            d_person = gr.Dropdown(choices=[], label="Face", scale=0)
-            d_sheet = gr.Image(show_label=False)
-            with gr.Row():
-                d_refresh = gr.Button("Refresh", size="sm", scale=0)
-                d_export = gr.Button("Export to 3D/figures/", size="sm", scale=0)
-                d_msg = gr.Markdown(elem_classes="hint")
-            with gr.Accordion("All renders and their Mooneys", open=False):
-                d_gal_o = gr.Gallery(label="3D/Original/", columns=10, height=260, object_fit="contain", allow_preview=False)
-                d_gal_m = gr.Gallery(label="3D/Mooney/", columns=10, height=260, object_fit="contain", allow_preview=False)
-            gr.Markdown("### Compare stimulus sets\n<span class='hint'>The photos of the main project, the faces reconstructed from "
-                        "photos, the Basel model fitted to photos and the invented Basel faces, each with what the same systems returned. " + a3.COMPARE_NOTE + "</span>",
-                        elem_classes="prose")
-            x_table = gr.Dataframe(headers=["Measure"] + [a3.SET_NAMES[k] for k in a3.SETS], interactive=False, wrap=True, max_height=760,
-                                   label="One row per measure, one column per set")
-            x_fig = gr.Image(show_label=False)
-            x_lights = gr.Dataframe(headers=a3.LIGHT_HEADERS, interactive=False, wrap=True, max_height=760,
-                                    label="The 3D sets by light direction")
-            with gr.Row():
-                x_refresh = gr.Button("Refresh comparison", size="sm", scale=0)
-                x_export = gr.Button("Export comparison to figures/", size="sm", scale=0)
-                x_msg = gr.Markdown(elem_classes="hint")
+                    # -------------------------------------------------------------- Queue
+                    with gr.Tab("Queue") as tab_queue:
+                        gr.Markdown("Runs that go one after another without you. Set a run up in **One-button run** and press *Add to queue*; "
+                                    "start the queue here. A run that fails is marked and the next one starts. *Stop now* ends the run that is working "
+                                    "(it is not saved) and halts the queue. " + QUEUE_NOTE, elem_classes="lead")
+                        q_line = gr.Markdown(elem_classes="prose")
+                        with gr.Row():
+                            q_start = gr.Button("Start queue", variant="primary", scale=2)
+                            q_stop = gr.Button("Stop after the current run", scale=1)
+                            q_stop_now = gr.Button("Stop now", variant="stop", scale=1)
+                            q_clear = gr.Button("Clear finished", scale=1)
+                            q_refresh = gr.Button("Refresh", scale=0, min_width=90)
+                        q_table = gr.Dataframe(headers=QUEUE_COLS, interactive=False, wrap=True,
+                                               column_widths=["5%", "18%", "9%", "13%", "13%", "8%", "34%"])
+                        with gr.Row():
+                            q_item = gr.Dropdown(choices=[], label="An item of the queue", scale=3)
+                            q_up = gr.Button("Move up", scale=1)
+                            q_down = gr.Button("Move down", scale=1)
+                            q_remove = gr.Button("Remove", variant="stop", scale=1)
+                        q_msg = gr.Markdown(elem_classes="hint")
+                        q_log = gr.Textbox(label="Log", lines=14, max_lines=14, interactive=False, autoscroll=True, elem_classes="log")
+                        gr.Markdown("The queue is kept in the project (`queue.json`), so it is still there after a restart; a run that was "
+                                    "working when the app was closed is marked *stopped*. The app must stay open and the computer awake "
+                                    "while the queue runs. This page refreshes itself every few seconds.", elem_classes="hint")
+                        q_timer = gr.Timer(4, active=False)
 
-        # ------------------------------------------------------------------ Notes (only if the working folder has any)
-        _notes = note_files()
-        if _notes:
-            with gr.Tab("Notes"):
-                gr.Markdown(f"Your own notes: the Markdown files in <span class='mono'>{NOTES_ROOT}</span>, with their pictures. "
-                            "They are read when the app starts and are not part of the app.", elem_classes="lead")
-                note_pick = gr.Radio([(note_title(f), f) for f in _notes], value=_notes[0], label="Note")
-                note_boxes = []
-                for _i, _f in enumerate(_notes):
-                    with gr.Column(visible=_i == 0) as _box:
-                        for kind, body in doc_segments(os.path.join(NOTES_ROOT, _f)):
-                            if kind == "text":
-                                gr.Markdown(body, elem_classes="prose")
-                            elif os.path.exists(body[1]):
-                                gr.Image(body[1], label=body[0], interactive=False)
-                    note_boxes.append(_box)
-                note_pick.change(lambda f: [gr.update(visible=f == g) for g in _notes], note_pick, note_boxes)
+                    # -------------------------------------------------------------- Saved runs
+                    with gr.Tab("Saved runs") as tab_runs:
+                        gr.Markdown("Every saved run, newest first. A run is a folder in the runs folder shown on Home: the Mooneys, the values "
+                                    "they were made with, and the results, frozen at the moment of saving. Put runs side by side in "
+                                    "**Analysis → Compare runs**.", elem_classes="lead")
+                        p_runs = gr.Dataframe(headers=RUNS_COLS, interactive=False, wrap=True, column_widths=RUNS_WIDTHS)
+                        sr_pick = gr.Dropdown(choices=run_folder_choices(), label="Show a saved run")
+                        sr_facts = gr.Markdown(elem_classes="prose")
+                        sr_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary of this run", wrap=True, interactive=False)
+                        sr_fig = gr.Image(show_label=False, height=380)
 
-        # ------------------------------------------------------------------ Docs
-        with gr.Tab("Docs"):
-            gr.Markdown(read_doc("MANUAL.md", "_docs/MANUAL.md is missing._"), elem_classes="prose")
+            # ================================================================== Analysis
+            with gr.Column(visible=False) as sec_analysis:
+                pg_analysis = gr.State("Results")
+                with gr.Tabs():
+                    # -------------------------------------------------------------- Results
+                    with gr.Tab("Results") as tab_results:
+                        gr.Markdown("What the vision systems returned, for the originals and for the Mooneys. Nothing is computed here; "
+                                    "press **Refresh** after running a system.", elem_classes="lead")
+                        with gr.Row():
+                            r_refresh = gr.Button("Refresh", variant="primary", size="sm", scale=0)
+                            r_export = gr.Button("Export figures to figures/", size="sm", scale=0)
+                            r_msg = gr.Markdown(elem_classes="hint")
+                        r_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
+                        r_fig = gr.Image(show_label=False, height=380)
+                        with gr.Row():
+                            r_stem = gr.Dropdown(choices=[], label="Photo", scale=3)
+                            r_prev = gr.Button("← Previous", size="sm", scale=1)
+                            r_next = gr.Button("Next →", size="sm", scale=1)
+                        r_panel = gr.Image(label="Original and Mooney with each system's output", height=520)
+                        r_detail = gr.Markdown(elem_classes="prose")
+                        gr.Markdown("<span class='hint'>To keep this state under a name, save it as a run in **Experiments**.</span>",
+                                    elem_classes="prose")
+
+                    # -------------------------------------------------------------- By photo properties
+                    with gr.Tab("By photo properties") as tab_analysis:
+                        gr.Markdown("How the results relate to the photos. Each photo is one data point: its brightness, head turn and Mooney settings on one "
+                                    "side, what each vision system returned on the other. Nothing is computed by a model here; the page only reads the "
+                                    "result tables. Press **Refresh** after running a system.", elem_classes="lead")
+                        with gr.Row():
+                            a_refresh = gr.Button("Refresh", variant="primary", size="sm", scale=0)
+                            a_export = gr.Button("Export analysis to figures/", size="sm", scale=0)
+                            a_msg = gr.Markdown(elem_classes="hint")
+                        gr.Markdown("### The dataset", elem_classes="prose")
+                        with gr.Row():
+                            a_ds_table = gr.Dataframe(headers=["", "count"], interactive=False, scale=1, label="What the dataset holds")
+                            a_ds_fig = gr.Image(show_label=False, scale=3)
+                        gr.Markdown("### Each system: original versus Mooney\n<span class='hint'>One bar chart or histogram per value. A histogram shows how many "
+                                    "photos fall into each range; the dashed line is the mean.</span>", elem_classes="prose")
+                        a_sys_fig = gr.Image(show_label=False)
+                        gr.Markdown("### By group", elem_classes="prose")
+                        a_by = gr.Radio(list(an.GROUPINGS), value="Face brightness", label="Group the photos by")
+                        gr.Markdown("Face brightness: three equally large groups by the mean gray value of the face. Head turn: frontal, slightly turned, strongly "
+                                    "turned, from the position of the nose between the eyes. Groups with fewer than 10 photos are marked, because their "
+                                    "percentages are unreliable.", elem_classes="hint")
+                        a_grp_table = gr.Dataframe(interactive=False, wrap=True, label="One row per group; every value with the number of photos behind it")
+                        a_grp_fig = gr.Image(show_label=False)
+                        gr.Markdown("### Do the systems agree?\n<span class='hint'>Correlation across photos between two results: +1 means the same photos score "
+                                    "high on both, 0 means no relation, -1 means the opposite. Yes/no results count as 1 and 0.</span>", elem_classes="prose")
+                        with gr.Row():
+                            a_agree_table = gr.Dataframe(headers=["result A", "result B", "correlation", "photos"], interactive=False, scale=3,
+                                                         label="Strongest relation first")
+                            a_agree_fig = gr.Image(show_label=False, scale=2)
+                        gr.Markdown("### Hardest and easiest photos\n<span class='hint'>Ranked by the average of the photo's rank on every available result "
+                                    "(similarity, similarity after re-blurring, both depth matches, face found after re-blurring, language model says face). "
+                                    "Hard and easy for the models, not for people.</span>", elem_classes="prose")
+                        a_hard = gr.Gallery(label="Hardest for the systems", columns=8, height=190, object_fit="contain")
+                        a_easy = gr.Gallery(label="Easiest for the systems", columns=8, height=190, object_fit="contain")
+                        a_rank = gr.Dataframe(headers=an.RANK_COLS, interactive=False, label="The values behind the two rows of pictures")
+                        gr.Markdown("### In words", elem_classes="prose")
+                        a_words = gr.Markdown(elem_classes="prose")
+
+                    # -------------------------------------------------------------- Compare runs
+                    with gr.Tab("Compare runs") as tab_compare:
+                        gr.Markdown("Put saved runs side by side. *current* is the project as it is now. The first table is the results summary "
+                                    "with one column per run; the second shows what each run's Mooneys were made with. Runs are saved in "
+                                    "**Experiments**.", elem_classes="lead")
+                        c_runs = gr.Dropdown(choices=run_choices(), value=[], multiselect=True, label="Runs to put side by side")
+                        c_msg = gr.Markdown(elem_classes="hint")
+                        c_table = gr.Dataframe(interactive=False, wrap=True, label="Results, one column per run")
+                        c_settings = gr.Dataframe(interactive=False, wrap=True, label="What each run's Mooneys were made with (from its params.csv)")
+
+                    # -------------------------------------------------------------- 3D comparison
+                    with gr.Tab("3D comparison") as tab_truth:
+                        gr.Markdown("The systems against the truth. For a 3D dataset the depth of every pixel is known, so a system's depth map "
+                                    "can be compared with the depth the picture was drawn from, for the render and for its Mooney. Make a 3D "
+                                    "dataset in **Dataset → 3D datasets** and run the systems on it in **Experiments → Vision systems**.",
+                                    elem_classes="lead")
+                        t_source = gr.Radio(list(D3_SOURCES), value=list(D3_SOURCES)[0], label="3D dataset of the source")
+                        d_truth_line = gr.Markdown(elem_classes="hint")
+                        gr.Markdown("### By light direction\n<span class='hint'>n = renders in the row. *Face found* counts images. Similarity is the "
+                                    "face model's (−1 to 1). *Depth vs truth* is the correlation, inside the face, between a system's depth map and "
+                                    "the depth the render was drawn from: 1 = the same relief, 0 = unrelated.</span>", elem_classes="prose")
+                        d_table = gr.Dataframe(headers=a3.HEADERS, interactive=False, wrap=True, label="One row per light direction")
+                        d_fig = gr.Image(show_label=False)
+                        gr.Markdown("### One face under every light", elem_classes="prose")
+                        d_person = gr.Dropdown(choices=[], label="Face", scale=0)
+                        d_sheet = gr.Image(show_label=False)
+                        with gr.Row():
+                            d_refresh = gr.Button("Refresh", size="sm", scale=0)
+                            d_export = gr.Button("Export to 3D/figures/", size="sm", scale=0)
+                            d_msg = gr.Markdown(elem_classes="hint")
+                        gr.Markdown("### Compare stimulus sets\n<span class='hint'>The photos of the main project, the faces reconstructed from "
+                                    "photos, the Basel model fitted to photos and the invented Basel faces, each with what the same systems returned. "
+                                    + a3.COMPARE_NOTE + "</span>", elem_classes="prose")
+                        x_table = gr.Dataframe(headers=["Measure"] + [a3.SET_NAMES[k] for k in a3.SETS], interactive=False, wrap=True, max_height=760,
+                                               label="One row per measure, one column per set")
+                        x_fig = gr.Image(show_label=False)
+                        x_lights = gr.Dataframe(headers=a3.LIGHT_HEADERS, interactive=False, wrap=True, max_height=760,
+                                                label="The 3D sets by light direction")
+                        with gr.Row():
+                            x_refresh = gr.Button("Refresh comparison", size="sm", scale=0)
+                            x_export = gr.Button("Export comparison to figures/", size="sm", scale=0)
+                            x_msg = gr.Markdown(elem_classes="hint")
+
+            # ================================================================== Docs
+            with gr.Column(visible=False) as sec_docs:
+                with gr.Tabs():
+                    with gr.Tab("Manual"):
+                        gr.Markdown(read_doc("MANUAL.md", "_docs/MANUAL.md is missing._"), elem_classes="prose")
+                    with gr.Tab("Vision systems"):
+                        gr.Markdown(read_doc("VISION_SYSTEMS.md", "_docs/VISION_SYSTEMS.md is missing._"), elem_classes="prose")
+                    with gr.Tab("References") as tab_refs:
+                        refs_md = gr.Markdown(references_md(), elem_classes=["prose", "refs"])
+                    # Notes: only if the working folder has any
+                    _notes = note_files()
+                    if _notes:
+                        with gr.Tab("Notes"):
+                            gr.Markdown(f"Your own notes: the Markdown files in <span class='mono'>{NOTES_ROOT}</span>, with their pictures. "
+                                        "They are read when the app starts and are not part of the app.", elem_classes="lead")
+                            note_pick = gr.Radio([(note_title(f), f) for f in _notes], value=_notes[0], label="Note")
+                            note_boxes = []
+                            for _i, _f in enumerate(_notes):
+                                with gr.Column(visible=_i == 0) as _box:
+                                    for kind, body in doc_segments(os.path.join(NOTES_ROOT, _f)):
+                                        if kind == "text":
+                                            gr.Markdown(body, elem_classes="prose")
+                                        elif os.path.exists(body[1]):
+                                            gr.Image(body[1], label=body[0], interactive=False)
+                                note_boxes.append(_box)
+                            note_pick.change(lambda f: [gr.update(visible=f == g) for g in _notes], note_pick, note_boxes)
 
     # ====================================================================== wiring
+    sections = [sec_home, sec_dataset, sec_mooney, sec_exp, sec_analysis, sec_docs]
     refresh_overview = lambda: (overview_md(), status_html())
+
+    def go(k):
+        """Show section k and mark its button."""
+        return ([gr.update(visible=i == k) for i in range(len(NAV))]
+                + [gr.update(variant="primary" if i == k else "secondary") for i in range(len(NAV))])
+
+    # one chain of events per menu button: show the section, then refresh the page that is open in it
+    nav_ev = [b.click(lambda k=k: go(k), None, sections + nav_btns, show_progress="hidden") for k, b in enumerate(nav_btns)]
+
+    def pages(k, state, items):
+        """Wire the pages of section k. items: (tab, name, refresher or None, inputs, outputs).
+        A page is refreshed when its tab is chosen, and when the menu opens the section while that page is the open one."""
+        for tab, name, fn, inputs, outputs in items:
+            tab.select(lambda name=name: name, None, state, show_progress="hidden")
+            if fn is None:
+                continue
+            tab.select(fn, inputs, outputs)
+
+            def guarded(page, *args, fn=fn, name=name, n=len(outputs)):
+                if page != name:
+                    return gr.update() if n == 1 else tuple(gr.update() for _ in range(n))
+                return fn(*args)
+            nav_ev[k] = nav_ev[k].then(guarded, [state] + list(inputs or []), outputs, show_progress="hidden")
 
     def refresh_page():
         """Runs on every page load, so a reload always shows what is on disk right now."""
@@ -1733,23 +2449,68 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                 fav_text(), fav_gallery(), d3_suggest(), gr.update(choices=run_choices()))
 
     demo.load(refresh_page, None, [status, overview, ds_gallery, ds_table, b_gal, b_tab, b_favs, fav_gal, d_files, c_runs])
-    tab_overview.select(refresh_overview, None, [overview, status])
+
+    # Stop: the job that is working ends after the image or step it is on (see run_logged)
+    for _b in (ds_stop, d_stop, b_stop, v_stop, p_stop):
+        _b.click(stop_job, None, None, show_progress="hidden")
+
+    # ---------------------------------------------------------------------- Home
+    nav_ev[0] = nav_ev[0].then(refresh_overview, None, [overview, status], show_progress="hidden")
     ov_refresh.click(refresh_overview, None, [overview, status])
     ov_work_btn.click(change_work_dir, ov_work, ov_work_msg)
     ov_work.submit(change_work_dir, ov_work, ov_work_msg)
 
-    # Dataset
+    # ---------------------------------------------------------------------- Dataset → Photos
     collect_btn.click(collect, [names_box, per_id, n_cand, min_face], [ds_log, ds_gallery, ds_table, status])
     ds_gallery.select(pick_photo, None, [ds_sel, ds_msg])
     ds_del.click(remove_photo, [ds_sel, lab_src], [ds_sel, ds_msg, ds_gallery, ds_table, status, b_gal, b_tab, fav_gal, lab_file])
 
-    # Batch
+    # ---------------------------------------------------------------------- Dataset → Subsets
+    s_shown = [s_line, s_cand, s_in, s_orig, s_msg, s_chosen]
+    s_args = [s_name, s_size, s_show, s_chosen]
+    subset_page = lambda n, z, sh, ch: subset_view(n, z, sh, ch) if ch else subset_open(n, sh)[1:]
+    s_pick.input(lambda n, sh: (n,) + subset_open(n, sh), [s_pick, s_show], [s_name, s_size] + s_shown)
+    s_name.submit(subset_view, s_args, s_shown)
+    s_name.blur(subset_view, s_args, s_shown)
+    s_show.change(subset_view, s_args, s_shown)
+    s_size.change(subset_view, s_args, s_shown)
+    s_cand.select(subset_toggle, s_args, s_shown)
+    s_in.select(subset_remove, s_args, s_shown)
+    s_fill.click(subset_fill, s_args, s_shown)
+    s_save.click(subset_save, s_args + [s_active], s_shown + [s_pick, status])
+    s_del.click(subset_delete, [s_name, s_show], [s_name, s_size] + s_shown + [s_pick, status])
+
+    # ---------------------------------------------------------------------- Dataset → 3D datasets
+    d_live = [d_state, d_gal_o, d_gal_m]
+    d_saved = [d_set_table, d_set_pick, d_set_msg]
+
+    def d3_page(source, model):
+        return ((gr.update(choices=photo_set_choices(suggest=True)), basel_note(model)) + d3_data_view(source) + d3_sets_view())
+
+    for button, steps in ((d_b1, ["render"]), (d_b2, ["Mooneys"]), (d_all, ["render", "Mooneys"])):
+        button.click(d3_run(steps), [d_source, d_files, d_lights, d_n, d_model, d_poses, d_shadows, d_fit_pose], [d_log] + d_live)
+    d_source.change(d3_switch, [d_source, d_model], [d_box_photos, d_box_basel, d_caveat, d_model_note, d_n, d_poses, d_fit_pose,
+                                                     d_set, d_files] + d_live)
+    d_model.change(basel_note, d_model, d_model_note)
+    d_suggest.click(d3_suggest, d_set, d_files)
+    d_set.change(d3_suggest, d_set, d_files)
+    d_set_save.click(d3_set_save, [d_source, d_set_name], d_saved)
+    d_set_load.click(d3_set_load, d_set_pick, [d_source] + d_live + d_saved)
+    d_set_del.click(d3_set_delete, d_set_pick, d_saved)
+
+    pages(1, pg_dataset, [
+        (tab_photos, "Photos", lambda: (gallery_of("Original"), dataset_table(), status_html()), None, [ds_gallery, ds_table, status]),
+        (tab_subset, "Subsets", subset_page, s_args, s_shown),
+        (tab_3d, "3D datasets", d3_page, [d_source, d_model], [d_set, d_model_note] + d_live + d_saved[:2]),
+    ])
+
+    # ---------------------------------------------------------------------- Mooney → Batch
     b_values = [b_sigma, b_white, b_bgm, b_bgl, b_sep, b_rule, b_bw, b_bb, b_pre]
     b_run.click(run_batch, [b_src] + b_values + [b_measure, b_keep, b_sweep, b_sig, b_wht], [b_log, b_gal, b_tab, status])
     b_save_def.click(save_defaults, b_values, b_log)
     b_gal.select(star_in_gallery, None, [b_favs, fav_gal])
 
-    # Mooney
+    # ---------------------------------------------------------------------- Mooney → By hand
     manual.change(lambda m: gr.update(visible=m), manual, thr)
     lab_controls = [inp, separate, bg_level, bg_mode, sigma, white, preprocess, manual, thr]
     lab_inputs = lab_controls + [lab_src, lab_file]
@@ -1764,6 +2525,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     lab_file.change(lab_star_label, [lab_src, lab_file], lab_fav)
     lab_prev.click(lambda s, f: lab_step(s, f, -1), [lab_src, lab_file], lab_file)
     lab_next.click(lambda s, f: lab_step(s, f, +1), [lab_src, lab_file], lab_file)
+
     def lab_save_now():
         msg = save_current()
         note = lab_saved_note(_last["stem"], _last["params"]) if _last["params"] else ""
@@ -1774,53 +2536,71 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     lab_default.click(lab_reset, None, [separate, bg_level, bg_mode, sigma, white, preprocess, manual])
     demo.load(lab_files, lab_src, lab_file)
 
-    # Subset
-    s_shown = [s_line, s_cand, s_in, s_orig, s_msg, s_chosen]
-    s_args = [s_name, s_size, s_show, s_chosen]
-    tab_subset.select(lambda n, z, sh, ch: subset_view(n, z, sh, ch) if ch else subset_open(n, sh)[1:], s_args, s_shown)
-    s_pick.input(lambda n, sh: (n,) + subset_open(n, sh), [s_pick, s_show], [s_name, s_size] + s_shown)
-    s_name.submit(subset_view, s_args, s_shown)
-    s_name.blur(subset_view, s_args, s_shown)
-    s_show.change(subset_view, s_args, s_shown)
-    s_size.change(subset_view, s_args, s_shown)
-    s_cand.select(subset_toggle, s_args, s_shown)
-    s_in.select(subset_remove, s_args, s_shown)
-    s_fill.click(subset_fill, s_args, s_shown)
-    s_save.click(subset_save, s_args + [s_active], s_shown + [s_pick, status])
-    s_del.click(subset_delete, [s_name, s_show], [s_name, s_size] + s_shown + [s_pick, status])
+    pages(2, pg_mooney, [
+        (tab_batch, "Batch", lambda: (gallery_of("Mooney"), params_table(), fav_text(), status_html()), None, [b_gal, b_tab, b_favs, status]),
+        (tab_lab, "By hand", fav_gallery, None, [fav_gal]),
+    ])
 
-    # Vision systems
+    # ---------------------------------------------------------------------- Experiments → Vision systems
+    v_shown = [v_line, v_table, v_fig]
     v_check.click(vision_status, None, [v_s1, v_s2, v_s3, v_s4, v_s5, v_model])
     v_identify.change(lambda on: vs.VLM_PROMPT_IDENTITY if on else vs.VLM_PROMPT, v_identify, v_prompt)
-    v_run1.click(vision_job(vs.run_face, args=lambda src, ident: {"source": src, "identify": bool(ident)}),
-                 [v_src, v_identify], [v_log, status])
-    v_run2.click(vision_job(vs.run_vlm, refuse="Not started. Either the chosen set of photos is empty, or no Ollama model is selected (start Ollama with `ollama serve`, pull a vision model, press the check button), "
-                                                    "or the subset is empty (mark favourites with the star first, or choose All photos).",
-                            args=vlm_args),
-                 [v_src, v_identify, v_model, v_prompt, v_scope], [v_log, status])
-    v_run3.click(vision_job(vs.run_depth, args=lambda src: {"source": src}), [v_src], [v_log, status])
-    v_run4.click(vision_job(vs.run_shading, args=lambda src: {"source": src}), [v_src], [v_log, status])
-    v_run5.click(vision_job(vs.run_mesh, args=lambda src: {"source": src}), [v_src], [v_log, status])
+    v_data.change(v_switch, [v_data, v_ticks], [v_ticks] + v_shown)
+    v_go.click(vision_run, [v_data, v_ticks, v_src, v_identify, v_model, v_prompt, v_scope], [v_log, status] + v_shown)
+    v_run_save.click(v_save_run, [v_run_name, v_keep, v_run_note], [v_run_msg, c_runs])
+    o_check.click(ollama_refresh, None, [o_line, v_model, v_s2])
+    o_start.click(ollama_start, None, [o_line, v_model, v_s2])
+    o_pull.click(ollama_pull, o_name, [v_log, o_line, v_model, v_s2])
 
-    # Results
+    # ---------------------------------------------------------------------- Experiments → One-button run, Queue, Saved runs
+    p_form = [p_name, p_note, p_keep, p_batch, p_sigma, p_white, p_bg, p_bgl, p_systems, p_3d, p_faces, p_export, p_save,
+              p_vlm_set, p_3d_set, p_fit_set]
+    p_shown = [p_msg, p_table, p_fig, p_cmp]
+    p_run.click(pipeline, p_form, [p_log] + p_shown + [status, c_runs])
+    p_queue.click(queue_add, p_form, p_msg)
+    p_only.click(pipeline_save_only, [p_name, p_keep, p_note], [p_msg, c_runs])
+
+    def run_page():
+        return pipeline_view() + (gr.update(choices=photo_set_choices(), value=vlm_scope_label()),
+                                  gr.update(choices=photo_set_choices(suggest=True)), gr.update(choices=photo_set_choices()))
+
+    q_shown = [q_table, q_item, q_log, q_line]
+    q_start.click(queue_start, None, q_shown + [q_msg])
+    q_stop.click(queue_stop, None, q_shown + [q_msg])
+    q_stop_now.click(queue_stop_now, None, q_shown + [q_msg])
+    q_clear.click(queue_clear, None, q_shown + [q_msg])
+    q_refresh.click(queue_view, None, q_shown)
+    q_up.click(lambda i: queue_change(i, "up"), q_item, q_shown + [q_msg])
+    q_down.click(lambda i: queue_change(i, "down"), q_item, q_shown + [q_msg])
+    q_remove.click(lambda i: queue_change(i, "remove"), q_item, q_shown + [q_msg])
+    q_timer.tick(queue_tick, None, [q_table, q_log, q_line], show_progress="hidden")
+    sr_pick.change(run_show, sr_pick, [sr_facts, sr_table, sr_fig])
+
+    pages(3, pg_exp, [
+        (tab_vision, "Vision systems", v_page, [v_data, v_ticks], [v_data, v_scope, v_ticks] + v_shown),
+        (tab_run, "One-button run", run_page, None, p_shown + [p_vlm_set, p_3d_set, p_fit_set]),
+        (tab_queue, "Queue", queue_view, None, q_shown),
+        (tab_runs, "Saved runs", runs_page, None, [p_runs, sr_pick]),
+    ])
+    # the timer of the Queue page ticks only while that page is the one shown
+    tab_queue.select(lambda: gr.Timer(active=True), None, q_timer, show_progress="hidden")
+    for _t in (tab_vision, tab_run, tab_runs):
+        _t.select(lambda: gr.Timer(active=False), None, q_timer, show_progress="hidden")
+    for _k in range(len(NAV)):
+        if _k == 3:
+            nav_ev[_k] = nav_ev[_k].then(lambda page: gr.Timer(active=page == "Queue"), pg_exp, q_timer, show_progress="hidden")
+        else:
+            nav_ev[_k] = nav_ev[_k].then(lambda: gr.Timer(active=False), None, q_timer, show_progress="hidden")
+
+    # ---------------------------------------------------------------------- Analysis → Results
     r_refresh.click(results_load, None, [r_table, r_fig, r_stem, r_msg])
     r_stem.change(results_show, r_stem, [r_panel, r_detail])
     r_prev.click(lambda s: results_step(s, -1), r_stem, r_stem)
     r_next.click(lambda s: results_step(s, +1), r_stem, r_stem)
     r_export.click(results_export, None, r_msg)
     demo.load(results_load, None, [r_table, r_fig, r_stem, r_msg])
-    # Run
-    p_shown = [p_msg, p_table, p_fig, p_cmp, p_runs]
-    p_run.click(pipeline, [p_name, p_note, p_keep, p_batch, p_sigma, p_white, p_bg, p_bgl, p_systems, p_3d, p_faces, p_export, p_save,
-                           p_vlm_set, p_3d_set, p_fit_set],
-                [p_log] + p_shown + [status, c_runs])
-    p_only.click(pipeline_save_only, [p_name, p_keep, p_note], [p_msg, p_runs, c_runs])
-    tab_run.select(pipeline_view, None, p_shown)
-    tab_run.select(lambda: (gr.update(choices=photo_set_choices(), value=vlm_scope_label()),
-                            gr.update(choices=photo_set_choices(suggest=True)), gr.update(choices=photo_set_choices())), None,
-                   [p_vlm_set, p_3d_set, p_fit_set])
 
-    # Analysis
+    # ---------------------------------------------------------------------- Analysis → By photo properties, Compare runs
     def analysis_groups(by):
         head, rows = an.group_table(PROJECT_ROOT, by)
         return gr.update(value=rows, headers=head), an.fig_groups(PROJECT_ROOT, by), an.statements(PROJECT_ROOT, by)
@@ -1828,7 +2608,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     def analysis_load(by):
         hard, easy, rank_rows = an.ranking(PROJECT_ROOT)
         has_results = an.fig_systems(PROJECT_ROOT) is not None
-        msg = "" if has_results else "No results to analyse yet. Run the vision systems in tab 4, then press Refresh."
+        msg = "" if has_results else "No results to analyse yet. Run the vision systems in Experiments → Vision systems, then press Refresh."
         return (an.dataset_table(PROJECT_ROOT), an.fig_dataset(PROJECT_ROOT), an.fig_systems(PROJECT_ROOT), *analysis_groups(by),
                 an.agreement_table(PROJECT_ROOT), an.fig_agreement(PROJECT_ROOT), hard, easy, rank_rows, msg)
 
@@ -1838,31 +2618,30 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
 
     a_outputs = [a_ds_table, a_ds_fig, a_sys_fig, a_grp_table, a_grp_fig, a_words, a_agree_table, a_agree_fig, a_hard, a_easy, a_rank, a_msg]
     a_refresh.click(analysis_load, a_by, a_outputs)
-    tab_analysis.select(analysis_load, a_by, a_outputs)
     a_by.change(analysis_groups, a_by, [a_grp_table, a_grp_fig, a_words])
     a_export.click(analysis_export, a_by, a_msg)
     c_runs.change(runs_compare, c_runs, [c_table, c_settings, c_msg])
 
-    # 3D faces
-    d_shown = [d_state, d_table, d_fig, d_person, d_sheet, d_gal_o, d_gal_m]
+    # ---------------------------------------------------------------------- Analysis → 3D comparison
+    t_shown = [d_truth_line, d_table, d_fig, d_person, d_sheet, d_export]
     x_shown = [x_table, x_lights, x_fig, x_msg]
-    for button, steps in ((d_b1, ["render"]), (d_b2, ["Mooneys"]), (d_b3, ["systems"]), (d_all, ["render", "Mooneys", "systems"])):
-        button.click(d3_run(steps), [d_source, d_files, d_lights, d_person, d_n, d_model, d_poses, d_shadows, d_fit_pose],
-                     [d_log] + d_shown).then(d3_compare, None, x_shown)
-    d_source.change(d3_switch, [d_source, d_model], [d_box_photos, d_box_basel, d_caveat, d_model_note, d_export, d_n, d_poses, d_fit_pose,
-                                                     d_set, d_files] + d_shown)
-    d_model.change(basel_note, d_model, d_model_note)
-    d_suggest.click(d3_suggest, d_set, d_files)
-    d_set.change(d3_suggest, d_set, d_files)
-    tab_vision.select(lambda: gr.update(choices=photo_set_choices(), value=vlm_scope_label()), None, v_scope)
-    tab_3d.select(lambda: gr.update(choices=photo_set_choices(suggest=True)), None, d_set)
-    d_person.change(d3_sheet, [d_source, d_person], d_sheet)
-    d_refresh.click(d3_results, [d_source, d_person], d_shown)
-    tab_3d.select(d3_results, [d_source, d_person], d_shown).then(d3_compare, None, x_shown)
-    tab_3d.select(basel_note, d_model, d_model_note)
-    d_export.click(d3_export, d_source, d_msg)
+    truth_page = lambda source, person: d3_truth_view(source, person) + d3_compare()
+    t_source.change(d3_truth_view, [t_source, d_person], t_shown)
+    d_person.change(d3_sheet, [t_source, d_person], d_sheet)
+    d_refresh.click(d3_truth_view, [t_source, d_person], t_shown)
+    d_export.click(d3_export, t_source, d_msg)
     x_refresh.click(d3_compare, None, x_shown)
     x_export.click(d3_compare_export, None, x_msg)
+
+    pages(4, pg_analysis, [
+        (tab_results, "Results", results_load, None, [r_table, r_fig, r_stem, r_msg]),
+        (tab_analysis, "By photo properties", analysis_load, [a_by], a_outputs),
+        (tab_compare, "Compare runs", lambda: gr.update(choices=run_choices()), None, [c_runs]),
+        (tab_truth, "3D comparison", truth_page, [t_source, d_person], t_shown + x_shown),
+    ])
+
+    # ---------------------------------------------------------------------- Docs
+    tab_refs.select(references_md, None, refs_md)
 
 
 def launch_options():

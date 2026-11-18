@@ -48,7 +48,7 @@ comparison of two embeddings does.
 | `similarity_to_own_original` | sum of the products of the two normalised embeddings (cosine similarity), −1 to 1 | near 0: the model sees nothing in common. Two photos of one person usually score above about 0.36 with this model |
 | `reblur_face_detected`, `reblur_similarity_to_own_original` | the same two values for the re-blurred Mooney | if they recover, the hard edges were the obstacle, not missing information |
 
-In the Results tab: the number of images with a face detected, and the mean similarity.
+In Analysis → Results: the number of images with a face detected, and the mean similarity.
 
 ---
 
@@ -191,7 +191,7 @@ to the mesh from the original. Results go to `Result5/`.
 
 ## 3D faces: the systems against known truth
 
-In the *3D faces* tab systems 1, 3 and 4 run unchanged on renders and on the Mooneys of those renders. All
+On a 3D dataset (Experiments → Vision systems) systems 1, 3 and 4 run unchanged on renders and on the Mooneys of those renders. All
 values above keep their meaning, with "original" read as "render". Two values are added, both calculated by
 us and stored in `3D/analysis/truth_scores.csv`:
 
@@ -248,7 +248,7 @@ in `3D_basel_fit/analysis/truth_scores.csv`.
 
 ### Comparing the stimulus sets
 
-*Compare stimulus sets* in the 3D tab reads, for the photos and for each 3D set, the tables the systems wrote:
+*Compare stimulus sets* in Analysis → 3D comparison reads, for the photos and for each 3D set, the tables the systems wrote:
 
 | Row | Taken from | Calculated by us |
 |---|---|---|

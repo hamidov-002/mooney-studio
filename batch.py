@@ -164,43 +164,54 @@ def run_batch(project, source="Original", sigmas=(cfg.MOONEY_SIGMA,), whites=(cf
     fc = FaceConf() if (use_face_conf or stats_on == "face") else None
     rows, t0, kept, bright_n = [], time.time(), 0, 0
     width = max(len(os.path.splitext(f)[0]) for f in files)
-    for i, f in enumerate(files):
-        stem = os.path.splitext(f)[0]; out = stem + ".png"
-        tag = f"[{i + 1:>{len(str(len(files)))}}/{len(files)}] {stem:<{width}}"
-        if keep_manual and old.get(out, {}).get("mode") == "manual" and os.path.exists(os.path.join(dst, out)):
-            rows.append(old[out]); kept += 1
-            log(f"{tag}  kept as adjusted by hand")
+    try:
+        for i, f in enumerate(files):
+            stem = os.path.splitext(f)[0]; out = stem + ".png"
+            tag = f"[{i + 1:>{len(str(len(files)))}}/{len(files)}] {stem:<{width}}"
+            if keep_manual and old.get(out, {}).get("mode") == "manual" and os.path.exists(os.path.join(dst, out)):
+                rows.append(old[out]); kept += 1
+                log(f"{tag}  kept as adjusted by hand")
+                if progress: progress((i + 1) / len(files))
+                continue
+            img = Image.open(os.path.join(src, f)).convert("RGB")
+            img = resize_max(img, 1024)
+            mask = subject_mask(img) if separate else None
+            stat = face_region(img, fc.ff if fc else None) if stats_on == "face" else None
+            fb = face_brightness(img, mask, stat)
+            is_bright = white_rule == "brightness" and fb is not None and fb >= bright_border
+            bright_n += is_bright
+            best = None
+            for s in sigmas:
+                for w in ((bright_white,) if is_bright else whites):
+                    r = make_mooney(img, sigma=s, white_fraction=w, separate=separate and mask is not None, bg_level=bg_level,
+                                    mask=mask, bg_mooney=bg_mooney, stat_region=stat, preprocess=preprocess)
+                    region = (r.mask > 0.5) if r.mask is not None else None
+                    q, e, sp, it, fconf = quality(r.gray, r.mooney, stat if stat is not None else region, fc if use_face_conf else None)
+                    if best is None or q > best[0]:
+                        best = (q, e, sp, it, fconf, s, w, r)
+            q, e, sp, it, fconf, s, w, r = best
+            Image.fromarray(r.mooney).save(os.path.join(dst, out))
+            rows.append({"file": out, "source": f, "sigma": s, "white_target": w, "white_fraction": f"{r.white_fraction:.4f}",
+                         "threshold": f"{r.threshold:.2f}", "bg_level": bg_level, "bg_mooney": bg_mooney, "separated": int(r.mask is not None),
+                         "stats_on": "face" if stat is not None else "subject",
+                         "face_brightness": "" if fb is None else f"{fb:.0f}", "white_rule": white_rule, "preprocess": preprocess,
+                         "quality": f"{q:.3f}", "fidelity": f"{e:.3f}", "simplicity": f"{sp:.3f}", "integrity": f"{it:.3f}",
+                         "face_conf": "" if fconf is None else f"{fconf:.3f}", "mode": "batch",
+                         "sweep": "sigma=" + ";".join(str(x) for x in sigmas) + " white=" + ";".join(str(x) for x in whites)})
+            log(f"{tag}  blur {s:g} · white {r.white_fraction * 100:4.1f} % (target {w * 100:g}) · threshold {r.threshold:3.0f}"
+                + ("" if fb is None else f" · face brightness {fb:3.0f}") + ("  [bright face]" if is_bright else "")
+                + ("" if stat is not None or stats_on != "face" else "  [no face found: measured on the person]"))
             if progress: progress((i + 1) / len(files))
-            continue
-        img = Image.open(os.path.join(src, f)).convert("RGB")
-        img = resize_max(img, 1024)
-        mask = subject_mask(img) if separate else None
-        stat = face_region(img, fc.ff if fc else None) if stats_on == "face" else None
-        fb = face_brightness(img, mask, stat)
-        is_bright = white_rule == "brightness" and fb is not None and fb >= bright_border
-        bright_n += is_bright
-        best = None
-        for s in sigmas:
-            for w in ((bright_white,) if is_bright else whites):
-                r = make_mooney(img, sigma=s, white_fraction=w, separate=separate and mask is not None, bg_level=bg_level,
-                                mask=mask, bg_mooney=bg_mooney, stat_region=stat, preprocess=preprocess)
-                region = (r.mask > 0.5) if r.mask is not None else None
-                q, e, sp, it, fconf = quality(r.gray, r.mooney, stat if stat is not None else region, fc if use_face_conf else None)
-                if best is None or q > best[0]:
-                    best = (q, e, sp, it, fconf, s, w, r)
-        q, e, sp, it, fconf, s, w, r = best
-        Image.fromarray(r.mooney).save(os.path.join(dst, out))
-        rows.append({"file": out, "source": f, "sigma": s, "white_target": w, "white_fraction": f"{r.white_fraction:.4f}",
-                     "threshold": f"{r.threshold:.2f}", "bg_level": bg_level, "bg_mooney": bg_mooney, "separated": int(r.mask is not None),
-                     "stats_on": "face" if stat is not None else "subject",
-                     "face_brightness": "" if fb is None else f"{fb:.0f}", "white_rule": white_rule, "preprocess": preprocess,
-                     "quality": f"{q:.3f}", "fidelity": f"{e:.3f}", "simplicity": f"{sp:.3f}", "integrity": f"{it:.3f}",
-                     "face_conf": "" if fconf is None else f"{fconf:.3f}", "mode": "batch",
-                     "sweep": "sigma=" + ";".join(str(x) for x in sigmas) + " white=" + ";".join(str(x) for x in whites)})
-        log(f"{tag}  blur {s:g} · white {r.white_fraction * 100:4.1f} % (target {w * 100:g}) · threshold {r.threshold:3.0f}"
-            + ("" if fb is None else f" · face brightness {fb:3.0f}") + ("  [bright face]" if is_bright else "")
-            + ("" if stat is not None or stats_on != "face" else "  [no face found: measured on the person]"))
-        if progress: progress((i + 1) / len(files))
+    except BaseException:
+        # stopped or failed in the middle: params.csv must still describe the files on disk. The photos done get their
+        # new rows, the photos not reached keep the rows they had.
+        done = {r.get("file") for r in rows}
+        still = {os.path.splitext(f)[0] + ".png" for f in files}
+        part = rows + [r for k, r in old.items() if k not in done and k in still]
+        if part:
+            with open(pcsv, "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=list(dict.fromkeys(k for r in part for k in r))); w.writeheader(); w.writerows(part)
+        raise
     fields = list(dict.fromkeys(k for r in rows for k in r))
     with open(pcsv, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields); w.writeheader(); w.writerows(rows)

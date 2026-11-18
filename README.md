@@ -7,7 +7,7 @@ pixel are known.
 
 Everything runs on a laptop. No GPU and no account are needed.
 
-![The Overview page on first start](docs/screenshot_overview.png)
+![The Home page on first start](docs/screenshot_overview.png)
 
 ## Quick start
 
@@ -52,37 +52,37 @@ Nothing of yours is written into the code folder. Photos, Mooneys, results and s
 ~/MooneyStudio/
   project/     photos, Mooneys, results, settings
   runs/        saved runs
-  notes/       optional: your own Markdown notes, shown in a Notes tab
+  notes/       optional: your own Markdown notes, shown in Docs → Notes
 ```
 
 To choose another working folder:
 
-- in the app: **Overview**, *Working folder*, *Use this folder*, then restart the app;
+- in the app: **Home**, *Working folder*, *Use this folder*, then restart the app;
 - for one start only: `./run.sh --work ~/some/folder`;
 - or set `WORK_DIR` in `config.json`, or the environment variable `MOONEY_WORK`.
 
 Switching does not move anything: each working folder has its own project.
 
-## The tabs
+## The pages
 
-| Tab | What it does |
-|---|---|
-| Overview | where the project stands, what to do next, where the data is kept |
-| Run | the whole workflow with one button: name the run, tick the steps, set their values, see the results, keep them |
-| Dataset | collect openly licensed portraits from Wikimedia Commons, review them, remove bad ones |
-| Batch | one Mooney per photo with the same settings |
-| Mooney | adjust single photos by hand, mark favourites |
-| Subset | choose pairs from your favourites into named subsets of any size |
-| Vision systems | face model, vision-language model, learned depth, depth from shading |
-| Results | summary table, figure, per-photo viewer; save the run under a name |
-| Analysis | results by properties of the photos; compare saved runs |
-| 3D faces | renders with known light and depth (reconstructed from your photos, the Basel Face Model fitted to them, or invented Basel faces), their Mooneys, the systems against the truth, comparison of the stimulus sets |
-| Notes | your own Markdown notes from the working folder (only if there are any) |
-| Docs | the manual |
+The menu on the left has six sections; each has its pages as tabs across the top.
 
-![The Vision systems tab](docs/screenshot_systems.png)
+| Section | Pages | What they do |
+|---|---|---|
+| Home | – | where the project stands, what to do next, where the data is kept |
+| Dataset | Photos · Subsets · 3D datasets | collect openly licensed portraits from Wikimedia Commons and review them; choose pairs into named subsets; make datasets of rendered 3D faces with known light and depth (reconstructed from your photos, the Basel Face Model fitted to them, or invented Basel faces) and keep them under a name |
+| Mooney | Batch · By hand | one Mooney per photo with the same settings; adjust single photos and mark favourites |
+| Experiments | Vision systems · One-button run · Queue · Saved runs | run the ticked systems on the photos or on a 3D dataset; the whole workflow with one button; several runs one after another, unattended; every saved run |
+| Analysis | Results · By photo properties · Compare runs · 3D comparison | summary table, figure and per-photo viewer; results by properties of the photos; saved runs side by side; the systems against the true depth and the stimulus sets compared |
+| Docs | Manual · Vision systems · References · Notes | the manual; where every value comes from; literature, photo credits and use of AI; your own Markdown notes (only if there are any) |
 
-The manual is in [`docs/MANUAL.md`](docs/MANUAL.md). For every value the vision systems produce,
+A long job (collecting, Batch, the systems, a run) can be stopped with the Stop button next to it; it ends at
+the image it is working on.
+
+![Experiments → Vision systems](docs/screenshot_systems.png)
+
+The manual is in [`docs/MANUAL.md`](docs/MANUAL.md); literature and credits are in
+[`docs/REFERENCES.md`](docs/REFERENCES.md); [`AGENTS.md`](AGENTS.md) is for anyone changing the code, with or without a coding agent. For every value the vision systems produce,
 [`docs/VISION_SYSTEMS.md`](docs/VISION_SYSTEMS.md) says whether it is model output, one of the tool's
 settings, or calculated by the tool.
 
@@ -101,7 +101,8 @@ project/
   dataset.csv          licence, author and source page of every photo
   params.csv           the values used for every Mooney
   settings.json        saved defaults
-  3D/, 3D_basel_fit/, 3D_basel/   the 3D experiments: the same layout again, plus truth/
+  3D/, 3D_basel_fit/, 3D_basel/   the 3D datasets: the same layout again, plus truth/
+  3D_sets/<name>/      saved 3D datasets
 ```
 
 ## Settings
@@ -126,7 +127,7 @@ put it on the open internet without the login.
 
 ## Optional: the Basel Face Model
 
-The *3D faces* tab can draw invented faces from the Basel Face Model 2019, and fit the same model to the
+**Dataset → 3D datasets** can draw invented faces from the Basel Face Model 2019, and fit the same model to the
 landmarks of your photos (a Basel head with each person's overall proportions). **The model is not included in
 this repository.** It is free for non-commercial research after registration, and it may not be
 redistributed, so everyone has to get their own copy:
@@ -136,7 +137,7 @@ redistributed, so everyone has to get their own copy:
 2. Put the files into `models/` next to the code.
 
 `*.h5` and `models/` are in `.gitignore`. Keep it that way: never commit or share the files or your download
-links. Without the model the rest of the app works as before, and the tab says what is missing.
+links. Without the model the rest of the app works as before, and the page says what is missing.
 
 ## Data and licences
 
