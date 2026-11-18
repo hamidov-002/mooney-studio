@@ -632,11 +632,6 @@ def run_choices():
 RUN_LABELS = {v[0]: k for k, v in an.RUN_GROUPS.items()}          # label shown in the app -> key
 
 
-def run_save(name, labels, note):
-    folder, msg = an.save_run(PROJECT_ROOT, RUNS_ROOT, name, include=[RUN_LABELS[x] for x in (labels or [])], note=note)
-    return msg, gr.update(choices=run_choices())
-
-
 def runs_compare(names):
     head, rows, shead, srows = an.compare_runs(PROJECT_ROOT, RUNS_ROOT, names)
     if not rows and not srows:
@@ -786,7 +781,7 @@ def d3_compare():
     """The comparison of the stimulus sets: table by measure, table by light, chart, and a line if there is nothing yet."""
     head, rows = a3.compare_sets(PROJECT_ROOT)
     lhead, lrows = a3.compare_lights(PROJECT_ROOT)
-    msg = "" if rows else "Nothing to compare yet. Run the vision systems on the photos (tab 4) and the three steps above for a 3D source."
+    msg = "" if rows else "Nothing to compare yet. Run the vision systems on the photos and the three steps above for a 3D source."
     return (gr.update(value=rows or None, headers=head), gr.update(value=lrows or None, headers=lhead),
             a3.fig_compare(PROJECT_ROOT) if rows else None, msg)
 
@@ -794,6 +789,131 @@ def d3_compare():
 def d3_compare_export():
     made = a3.export_compare(PROJECT_ROOT)
     return f"Wrote {len(made)} files to figures/: " + ", ".join(made) if made else "Nothing to export yet."
+
+
+# ============================================================================ Run (the whole pipeline with one button)
+PIPE_SYSTEMS = ["1 Face model", "2 Vision-language model (subset only, needs Ollama)", "3 Learned depth", "4 Depth from shading"]
+RUNS_COLS = ["Name", "Saved", "Mooneys", "By hand", "Blur", "White", "Background", "Systems", "Also holds", "Note"]
+RUNS_WIDTHS = ["14%", "12%", "9%", "7%", "6%", "7%", "10%", "8%", "14%", "13%"]
+RUNS_SHORT = {"figures": "figures", "Subset": "subset", "3D": "3D from photos", "3D_basel": "3D Basel", "Original": "photos"}
+
+
+def runs_table():
+    """One row per saved run, newest first, read from each run's run.json."""
+    rows = []
+    for d in reversed(an.list_runs(RUNS_ROOT)):
+        try:
+            j = json.load(open(os.path.join(RUNS_ROOT, d, "run.json"), encoding="utf-8"))
+        except Exception:                                   # a run saved by hand, or a damaged file
+            j = {}
+        u, c = j.get("used", {}), j.get("counts", {})
+        systems = ", ".join(p[-1] for p in ("Result1", "Result2", "Result3", "Result4") if c.get(p)) or "–"
+        extra = ", ".join(short for part, short in RUNS_SHORT.items() if os.path.isdir(os.path.join(RUNS_ROOT, d, part))
+                          and any(not f.startswith(".") for _r, _d, fs in os.walk(os.path.join(RUNS_ROOT, d, part)) for f in fs))
+        rows.append([j.get("name", d), j.get("saved", ""), u.get("Mooneys", c.get("Mooney", "")), u.get("Adjusted by hand", ""),
+                     u.get("Blur σ (px)", ""), u.get("White target", ""), u.get("Background", ""), systems, extra or "–",
+                     j.get("note", "")])
+    return rows or None
+
+
+def pipeline_view(msg=""):
+    """What the Run tab shows below the log: message, summary table, figure, comparison of the stimulus sets, saved runs."""
+    rows = rs.summary(PROJECT_ROOT)
+    table = [[r.get(c, "") for c in SUMMARY_COLS] for r in rows] or None
+    head, crows = a3.compare_sets(PROJECT_ROOT)
+    return (msg, table, rs.figure(PROJECT_ROOT) if rows else None, gr.update(value=crows or None, headers=head),
+            gr.update(value=runs_table(), headers=RUNS_COLS))
+
+
+def pipeline(name, note, keep, do_batch, sigma, white, bg_mode, bg_level, systems, d3, n_faces, do_export, do_save,
+             progress=gr.Progress()):
+    """
+    One full run: Mooneys, vision systems, 3D faces, figures, saved copy - each part only if it is ticked.
+    Nothing here computes anything itself; every step calls the same function as its own tab.
+    """
+    init_project()
+    systems, d3 = list(systems or []), list(d3 or [])
+    refuse = None
+    if do_save and not an.run_slug(name):
+        refuse = "Not started: give the run a name first, or untick *Save the run*."
+    elif not images_in("Original"):
+        refuse = "Not started: there are no photos yet. Collect some in **Dataset** first."
+    elif not do_batch and not images_in("Mooney"):
+        refuse = "Not started: there are no Mooneys yet. Tick *Make the Mooneys*."
+    elif not (do_batch or systems or d3 or do_export or do_save):
+        refuse = "Not started: nothing is ticked."
+    if refuse:
+        yield (gr.update(), refuse) + (gr.update(),) * 6
+        return
+
+    steps, saved = [], {}
+    if do_batch:
+        def step_batch(log, prog):
+            st = save_settings(sigma=float(sigma), white=float(white), bg_mode=bg_mode, bg_level=int(bg_level))
+            log(f"Values: blur {st['sigma']:g} · white {st['white']:g} % · background {st['bg_mode']} · phase-1 gray {st['bg_level']}. "
+                "Saved as the project's defaults. Mooneys adjusted by hand are kept.")
+            bt.run_batch(PROJECT_ROOT, source="Original", sigmas=(float(sigma),), whites=(float(white) / 100,), bg_level=int(bg_level),
+                         separate=bool(st["separate"]), bg_mooney=bg_mode, stats_on="face", white_rule=st["white_rule"],
+                         bright_white=float(st["bright_white"]) / 100, bright_border=float(st["bright_border"]),
+                         preprocess=st["preprocess"], keep_manual=True, log=log, progress=prog)
+        steps.append(("Mooneys", 3, step_batch))
+    for label, fn in ((PIPE_SYSTEMS[0], vs.run_face), (PIPE_SYSTEMS[2], vs.run_depth), (PIPE_SYSTEMS[3], vs.run_shading)):
+        if label in systems:
+            steps.append((f"System {label}", 3, lambda log, prog, fn=fn: fn(PROJECT_ROOT, "Original", log=log, progress=prog)))
+    if PIPE_SYSTEMS[1] in systems:
+        def step_vlm(log, prog):
+            model, only = pick_model(vs.status()["vlm_models"]), subset_stems()
+            if not model:
+                log("Skipped: Ollama is not running or has no vision model (start it with `ollama serve`)."); return
+            if not only:
+                log("Skipped: the subset is empty and no favourites are marked."); return
+            vs.run_vlm(PROJECT_ROOT, model, source="Original", log=log, progress=prog, only=only)
+        steps.append(("System 2 Vision-language model, on the subset", 3, step_vlm))
+    for label in d3:
+        def step_3d(log, prog, label=label):
+            basel = {"faces": int(n_faces or cfg.BASEL_FACES), "model": "Whole head", "poses": ["frontal"], "shadows": cfg.BASEL_SHADOWS}
+            d3_job(["render", "Mooneys", "systems"], D3_SOURCES[label], a3.default_photos(PROJECT_ROOT),
+                   [l for l in cfg.LIGHTS_3D if l in f3.LIGHTS], basel, lambda v, desc=None: prog(v))(log)
+        steps.append((f"3D faces: {label[0].lower() + label[1:]}", 4, step_3d))
+    if do_export:
+        def step_export(log, prog):
+            favs = load_favs()
+            made = rs.export(PROJECT_ROOT, favs or rs.stems(PROJECT_ROOT)[:10])
+            log(f"figures/: {len(made)} files (summary table, figure, one panel each for "
+                + ("your favourites" if favs else "the first 10 photos") + ").")
+            for s in (f3.SUB, bfm.SUB):
+                if d3_gallery("Mooney", s):
+                    log(f"{s}/figures/: {len(a3.export(PROJECT_ROOT, s))} files.")
+            made = a3.export_compare(PROJECT_ROOT)
+            if made:
+                log(f"figures/: comparison of the stimulus sets, {len(made)} files.")
+        steps.append(("Export figures", 1, step_export))
+    if do_save:
+        def step_save(log, prog):
+            saved["folder"], saved["msg"] = an.save_run(PROJECT_ROOT, RUNS_ROOT, name, include=[RUN_LABELS[x] for x in (keep or [])], note=note)
+            log(saved["msg"])
+        steps.append(("Save the run", 1, step_save))
+
+    total = sum(w for _, w, _ in steps)
+
+    def job(log):
+        t0, done = time.time(), 0
+        log(f"Run{' “' + str(name).strip() + '”' if str(name).strip() else ''}: {len(steps)} steps.")
+        for k, (title, w, fn) in enumerate(steps):
+            log(""); log(f"── Step {k + 1} of {len(steps)}: {title}")
+            fn(log, lambda p, done=done, w=w, title=title: progress((done + w * min(max(float(p), 0), 1)) / total, desc=title))
+            done += w
+        log(""); log(f"Finished in {(time.time() - t0) / 60:.1f} min.")
+
+    def final():
+        msg = saved.get("msg") or ("Finished. Not saved as a run (the box was not ticked)." if not do_save else "Finished, but the run was not saved; see the log.")
+        return pipeline_view(msg) + (status_html(), gr.update(choices=run_choices()))
+    yield from run_logged(job, 7, final)
+
+
+def pipeline_save_only(name, keep, note):
+    folder, msg = an.save_run(PROJECT_ROOT, RUNS_ROOT, name, include=[RUN_LABELS[x] for x in (keep or [])], note=note)
+    return msg, gr.update(value=runs_table(), headers=RUNS_COLS), gr.update(choices=run_choices())
 
 
 # ============================================================================ documents shown in the app
@@ -880,9 +1000,6 @@ footer { display: none !important; }
 #head h1 { font-size: 21px; font-weight: 600; letter-spacing: -0.01em; margin: 0; color: var(--ink); line-height: 1.15; }
 #head .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .chips { margin-top: 2px; }
-#saverun { align-items: center; gap: 10px; margin: 0 0 6px 0 !important; max-width: 1100px; align-self: flex-start; width: 100%; }
-#saverun-msg { flex: 3 1 0; min-width: 260px; }
-#saverun-opts { max-width: 1100px; margin: 0 0 8px 0 !important; align-self: flex-start; width: 100%; }
 .chip { display: inline-block; border: 1px solid var(--line); background: var(--card); color: var(--muted);
   padding: 2px 9px; margin: 0 6px 6px 0; border-radius: 3px; font-size: 12px; white-space: nowrap; }
 .chip b { color: var(--ink); font-weight: 600; margin-left: 3px; font-variant-numeric: tabular-nums; }
@@ -925,18 +1042,6 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     gr.HTML("<div id='head'><div class='mark'></div><div><h1>Mooney Studio</h1><div class='sub'>Two-tone face images, "
             "and what vision systems make of them</div></div></div>")
     status = gr.HTML(status_html())
-    with gr.Row(elem_id="saverun", equal_height=True):
-        r_run_name = gr.Textbox("", show_label=False, container=False, scale=2, min_width=220,
-                                placeholder="Name for a saved run, for example: final run")
-        r_run_save = gr.Button("Save run", size="sm", scale=0, min_width=110)
-        r_run_msg = gr.Markdown("Freezes the current state in `runs/<date>_<name>/`. Choose below what goes in.",
-                                elem_classes="hint", elem_id="saverun-msg")
-    with gr.Accordion("What a saved run includes", open=False, elem_id="saverun-opts"):
-        with gr.Row():
-            r_run_inc = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
-                                         label="Besides the Mooneys and their values (always saved)", scale=3)
-            r_run_note = gr.Textbox("", label="Note (optional, stored with the run)", lines=2, scale=2,
-                                    placeholder="for example: last run, blur 6, 23 % white, 22 Mooneys adjusted by hand")
 
     with gr.Tabs():
         # ------------------------------------------------------------------ Overview
@@ -951,6 +1056,51 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                 ov_work_btn = gr.Button("Use this folder", size="md", scale=1, min_width=150)
             ov_work_msg = gr.Markdown("The change takes effect after a restart of the app. To use another folder for one start "
                                       "only: `./run.sh --work FOLDER`.", elem_classes="hint")
+
+        # ------------------------------------------------------------------ Run
+        with gr.Tab("Run") as tab_run:
+            gr.Markdown("One full run with one button. Give it a name, tick the steps and set their values, then press **Run**. "
+                        "Every step does exactly what its own tab does, in this order; the log shows where it is. "
+                        "At the end the run is saved under its name and date and the results appear below.", elem_classes="lead")
+            with gr.Row():
+                p_name = gr.Textbox("", label="Name of the run", placeholder="for example: final run", scale=2, max_lines=1)
+                p_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=3, max_lines=1,
+                                    placeholder="for example: blur 6, 23 % white, 22 Mooneys adjusted by hand")
+            with gr.Group():
+                p_batch = gr.Checkbox(True, label="Step 1 · Make the Mooneys (same as Batch; Mooneys adjusted by hand are kept)")
+                with gr.Row():
+                    p_sigma = gr.Slider(0, 20, value=_st["sigma"], step=0.1, label="Blur σ (px)")
+                    p_white = gr.Slider(5, 60, value=_st["white"], step=0.5, label="White share of the face (%)")
+                    p_bg = gr.Radio(["black", "white"], value=_st["bg_mode"] if _st["bg_mode"] in ("black", "white") else "black",
+                                    label="Background of the Mooney")
+                    p_bgl = gr.Slider(0, 255, value=_st["bg_level"], step=1, label="Phase-1 gray")
+            with gr.Row():
+                p_systems = gr.CheckboxGroup(PIPE_SYSTEMS, value=[PIPE_SYSTEMS[0], PIPE_SYSTEMS[2], PIPE_SYSTEMS[3]],
+                                             label="Step 2 · Vision systems, on every original and every Mooney", scale=3)
+            with gr.Row():
+                p_3d = gr.CheckboxGroup(list(D3_SOURCES), value=[], scale=3,
+                                        label="Step 3 · 3D faces: render, make Mooneys, run systems 1, 3 and 4 against the true depth")
+                p_faces = gr.Slider(2, 30, value=cfg.BASEL_FACES, step=1, label="Basel faces", scale=1)
+            with gr.Row():
+                p_export = gr.Checkbox(True, label="Step 4 · Export figures", scale=1)
+                p_save = gr.Checkbox(True, label="Step 5 · Save the run under its name", scale=1)
+                p_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
+                                          label="The saved run includes, besides the Mooneys and their values", scale=3)
+            gr.Markdown("3D from photos uses the suggested photos and the five default lights; Basel faces are whole heads, frontal, "
+                        "with cast shadows. For other choices use the **3D faces** tab. Other Batch options (white rule, "
+                        "preprocessing) are taken from the saved defaults.", elem_classes="hint")
+            with gr.Row():
+                p_run = gr.Button("Run", variant="primary", scale=2)
+                p_only = gr.Button("Only save the current state as a run", scale=1)
+            p_log = gr.Textbox(label="Log", lines=12, max_lines=12, interactive=False, autoscroll=True, elem_classes="log")
+            p_msg = gr.Markdown(elem_classes="hint")
+            gr.Markdown("### Results of the current state", elem_classes="prose")
+            p_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
+            p_fig = gr.Image(show_label=False, height=380)
+            p_cmp = gr.Dataframe(interactive=False, wrap=True, max_height=520, label="Photos and 3D sets side by side (empty until a 3D step has run)")
+            gr.Markdown("### Saved runs\n<span class='hint'>Newest first. Compare them in **Analysis**; each is a folder in the "
+                        "runs folder shown on Overview.</span>", elem_classes="prose")
+            p_runs = gr.Dataframe(headers=RUNS_COLS, interactive=False, wrap=True, column_widths=RUNS_WIDTHS)
 
         # ------------------------------------------------------------------ Dataset
         with gr.Tab("Dataset"):
@@ -1124,7 +1274,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                 r_next = gr.Button("Next →", size="sm", scale=1)
             r_panel = gr.Image(label="Original and Mooney with each system's output", height=520)
             r_detail = gr.Markdown(elem_classes="prose")
-            gr.Markdown("<span class='hint'>To keep this state, use **Save run** at the top of the page. Saved runs can be compared "
+            gr.Markdown("<span class='hint'>To keep this state under a name, use the **Run** tab. Saved runs can be compared "
                         "in **Analysis**.</span>", elem_classes="prose")
 
         # ------------------------------------------------------------------ Analysis
@@ -1325,7 +1475,12 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     r_next.click(lambda s: results_step(s, +1), r_stem, r_stem)
     r_export.click(results_export, None, r_msg)
     demo.load(results_load, None, [r_table, r_fig, r_stem, r_msg])
-    r_run_save.click(run_save, [r_run_name, r_run_inc, r_run_note], [r_run_msg, c_runs])
+    # Run
+    p_shown = [p_msg, p_table, p_fig, p_cmp, p_runs]
+    p_run.click(pipeline, [p_name, p_note, p_keep, p_batch, p_sigma, p_white, p_bg, p_bgl, p_systems, p_3d, p_faces, p_export, p_save],
+                [p_log] + p_shown + [status, c_runs])
+    p_only.click(pipeline_save_only, [p_name, p_keep, p_note], [p_msg, p_runs, c_runs])
+    tab_run.select(pipeline_view, None, p_shown)
 
     # Analysis
     def analysis_groups(by):

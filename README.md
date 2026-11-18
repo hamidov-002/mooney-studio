@@ -68,6 +68,7 @@ Switching does not move anything: each working folder has its own project.
 | Tab | What it does |
 |---|---|
 | Overview | where the project stands, what to do next, where the data is kept |
+| Run | the whole workflow with one button: name the run, tick the steps, set their values, see the results, keep them |
 | Dataset | collect openly licensed portraits from Wikimedia Commons, review them, remove bad ones |
 | Batch | one Mooney per photo with the same settings |
 | Mooney | adjust single photos by hand, mark favourites |

@@ -34,6 +34,24 @@ folder has its own project.
 The strip of counters under the title shows where the project stands on every tab. The Overview tab says
 what to do next.
 
+## Run: the whole workflow with one button
+
+The Run tab does steps 2, 4, 5 and 6 in one go and keeps the outcome under a name.
+
+1. Give the run a name and, if you like, a note.
+2. Tick the steps and set their values:
+   - **Make the Mooneys**: blur, white share, background and phase-1 gray. The values become the project's
+     defaults. Mooneys you adjusted by hand are kept. Untick it to use the Mooneys as they are.
+   - **Vision systems**: any of the four. System 2 runs on the subset only and is skipped if Ollama is not
+     running.
+   - **3D faces**: from your photos, from the Basel Face Model, or both, with the default photos and lights.
+   - **Export figures** and **Save the run**, with a choice of what the saved copy holds.
+3. Press **Run**. The log names each step as it starts; a step that cannot run says why and the rest goes on.
+
+Below the log the tab shows the summary table and figure of the current state, the photos and the 3D sets
+side by side, and the list of saved runs. *Only save the current state as a run* saves without running
+anything. Every step calls the same code as its own tab, so the two ways give the same results.
+
 ## Dataset
 
 Photos come from Wikimedia Commons. For each name the collector looks at up to 80 files and keeps a photo
@@ -153,13 +171,12 @@ mesh. Both are switched off by default. The controlled 3D experiment has its own
 - **Figure**: the counted measures as bars.
 - **Viewer**: for one photo, the original and the Mooney next to each system's output, with the values below.
 - **Export figures** writes the table, the figure and one panel per favourite to `figures/`.
-- **Save run** (at the top of every page) freezes the current state under a name in `runs/<date>_<name>/`.
-  The Mooneys, `params.csv`, `settings.json`, `favorites.json` and `dataset.csv` are always saved. Under
-  *What a saved run includes* you choose the rest: vision system results and tables, exported figures, the
-  subset, the two 3D branches, and the original photos (off by default). A note can be stored with the run.
-  `run.json` records the values the Mooneys were made with, the counts, the date, what was included, the note
-  and the list of photos. Saving twice under one name keeps both. A run without the result tables cannot be
-  used in *Compare runs*.
+- **Saving a run** (in the Run tab) freezes the current state under a name in `runs/<date>_<name>/`.
+  The Mooneys, `params.csv`, `settings.json`, `favorites.json` and `dataset.csv` are always saved. You choose
+  the rest: vision system results and tables, exported figures, the subset, the two 3D branches, and the
+  original photos (off by default). `run.json` records the values the Mooneys were made with, the counts, the
+  date, what was included, the note and the list of photos. Saving twice under one name keeps both. A run
+  without the result tables cannot be used in *Compare runs*.
 
 **Working with runs.** Save the run, change the settings in Batch, generate again, run the systems again,
 save under another name. Then compare the runs in the Analysis tab.
