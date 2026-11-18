@@ -153,11 +153,13 @@ mesh. Both are switched off by default. The controlled 3D experiment has its own
 - **Figure**: the counted measures as bars.
 - **Viewer**: for one photo, the original and the Mooney next to each system's output, with the values below.
 - **Export figures** writes the table, the figure and one panel per favourite to `figures/`.
-- **Save run** (at the top of every page) freezes the current state under a name. It copies everything except
-  the collected photos to `runs/<date>_<name>/`: `Mooney/`, `params.csv`, `Result1/` to `Result5/`,
-  `analysis/`, `figures/`, `Subset/`, the 3D branches, `settings.json`, `favorites.json` and `dataset.csv`,
-  and writes `run.json` there (the values the Mooneys were made with, counts, date, the list of photos).
-  Saving twice under one name keeps both.
+- **Save run** (at the top of every page) freezes the current state under a name in `runs/<date>_<name>/`.
+  The Mooneys, `params.csv`, `settings.json`, `favorites.json` and `dataset.csv` are always saved. Under
+  *What a saved run includes* you choose the rest: vision system results and tables, exported figures, the
+  subset, the two 3D branches, and the original photos (off by default). A note can be stored with the run.
+  `run.json` records the values the Mooneys were made with, the counts, the date, what was included, the note
+  and the list of photos. Saving twice under one name keeps both. A run without the result tables cannot be
+  used in *Compare runs*.
 
 **Working with runs.** Save the run, change the settings in Batch, generate again, run the systems again,
 save under another name. Then compare the runs in the Analysis tab.

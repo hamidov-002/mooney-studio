@@ -510,6 +510,16 @@ CURRENT = "current"
 RUN_PARTS = ["Mooney", "Result1", "Result2", "Result3", "Result4", "Result5", "analysis", "figures", "Subset",
              "3D", "3D_basel"]                                                             # folders copied into a run
 RUN_FILES = ["params.csv", "settings.json", "favorites.json", "dataset.csv"]              # files copied into a run
+# What a run can hold, in the order shown in the app: key -> (label, folders). The Mooneys and RUN_FILES are always kept.
+RUN_GROUPS = {
+    "results": ("Vision system results and tables", ["Result1", "Result2", "Result3", "Result4", "Result5", "analysis"]),
+    "figures": ("Exported figures", ["figures"]),
+    "subset": ("Subset", ["Subset"]),
+    "3d": ("3D faces from photos", ["3D"]),
+    "basel": ("3D faces from the Basel Face Model", ["3D_basel"]),
+    "photos": ("Original photos", ["Original"]),
+}
+RUN_DEFAULT = ["results", "figures", "subset", "3d", "basel"]                              # everything except the photos
 
 
 def _count(folder):
@@ -545,25 +555,35 @@ def run_slug(name):
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", str(name).strip().lower())).strip("-")[:60]
 
 
-def save_run(project, runs_dir, name):
+def _size_mb(folder):
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        total += sum(os.path.getsize(os.path.join(root, f)) for f in files)
+    return total / 1e6
+
+
+def save_run(project, runs_dir, name, include=None, note=""):
     """
-    Freeze the current state as runs/<date>_<name>/: Mooney/, Result1..5/, analysis/, figures/, Subset/, the two 3D
-    branches, params.csv, settings.json, favorites.json, dataset.csv, and run.json (settings, counts, date). The
-    collected photos in Original/ are not copied; run.json lists them. Returns (folder name, message). An existing run of the same name is kept:
-    the new one gets a number at the end.
+    Freeze the current state as runs/<date>_<name>/. Always kept: Mooney/, params.csv, settings.json,
+    favorites.json, dataset.csv and run.json (settings, counts, date, what was included, the note).
+    include: keys of RUN_GROUPS to copy as well (None = RUN_DEFAULT: everything except the photos).
+    note: free text stored in run.json. The photos are listed in run.json whether they are copied or not.
+    Returns (folder name, message). An existing run of the same name is kept: the new one gets a number at the end.
     """
     slug = run_slug(name)
     if not slug:
         return None, "Give the run a name first (letters or digits)."
     if not _count(os.path.join(project, "Mooney")):
         return None, "Nothing to save yet: there are no Mooneys."
+    include = [k for k in (RUN_DEFAULT if include is None else include) if k in RUN_GROUPS]
+    parts = ["Mooney"] + [p for k in RUN_GROUPS if k in include for p in RUN_GROUPS[k][1]]
     base = f"{time.strftime('%Y-%m-%d')}_{slug}"
     folder, k = base, 2
     while os.path.exists(os.path.join(runs_dir, folder)):
         folder = f"{base}-{k}"; k += 1
     dst = os.path.join(runs_dir, folder)
     os.makedirs(dst)
-    for part in RUN_PARTS:
+    for part in parts:
         if os.path.isdir(os.path.join(project, part)):
             shutil.copytree(os.path.join(project, part), os.path.join(dst, part))
     for f in RUN_FILES:
@@ -576,14 +596,25 @@ def save_run(project, runs_dir, name):
         pass
     src = os.path.join(project, "Original")
     info = {"name": str(name).strip(), "folder": folder, "saved": time.strftime("%Y-%m-%d %H:%M"),
+            "note": str(note or "").strip(), "included": include,
             "saved_defaults": settings, "used": used_settings(project),
             "counts": {p: _count(os.path.join(dst, p, "Mooney")) if p.startswith("Result") else _count(os.path.join(dst, p))
                        for p in RUN_PARTS},
             "photos": sorted(os.path.splitext(f)[0] for f in os.listdir(src) if not f.startswith(".")) if os.path.isdir(src) else []}
     json.dump(info, open(os.path.join(dst, "run.json"), "w", encoding="utf-8"), indent=2, ensure_ascii=False)
     done = [f"system {p[-1]}" for p in RUN_PARTS if p.startswith("Result") and info["counts"][p]]
-    return folder, (f"Saved as runs/{folder}/: {info['counts']['Mooney']} Mooneys, "
-                    + (f"results of {', '.join(done)}" if done else "no system results yet") + ".")
+    has = lambda k: any(os.path.isdir(os.path.join(dst, p)) for p in RUN_GROUPS[k][1])
+    kept = [RUN_GROUPS[k][0] for k in include if k != "results" and has(k)]
+    empty = [RUN_GROUPS[k][0] for k in include if not has(k)]
+    mb = _size_mb(dst)
+    msg = (f"Saved as runs/{folder}/ ({mb:.1f} MB): {info['counts']['Mooney']} Mooneys" if mb < 10 else
+           f"Saved as runs/{folder}/ ({mb:.0f} MB): {info['counts']['Mooney']} Mooneys")
+    msg += (f"; results of {', '.join(done)}" if done else "") + (f"; also: {', '.join(kept)}" if kept else "") + "."
+    if empty:
+        msg += f" Nothing to copy yet for: {', '.join(empty)}."
+    if "results" not in include:
+        msg += " Without the result tables this run cannot be used in Compare runs."
+    return folder, msg
 
 
 def list_runs(runs_dir):

@@ -629,8 +629,11 @@ def run_choices():
     return [an.CURRENT] + an.list_runs(RUNS_ROOT)
 
 
-def run_save(name):
-    folder, msg = an.save_run(PROJECT_ROOT, RUNS_ROOT, name)
+RUN_LABELS = {v[0]: k for k, v in an.RUN_GROUPS.items()}          # label shown in the app -> key
+
+
+def run_save(name, labels, note):
+    folder, msg = an.save_run(PROJECT_ROOT, RUNS_ROOT, name, include=[RUN_LABELS[x] for x in (labels or [])], note=note)
     return msg, gr.update(choices=run_choices())
 
 
@@ -877,8 +880,9 @@ footer { display: none !important; }
 #head h1 { font-size: 21px; font-weight: 600; letter-spacing: -0.01em; margin: 0; color: var(--ink); line-height: 1.15; }
 #head .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 .chips { margin-top: 2px; }
-#saverun { align-items: center; gap: 10px; margin: 0 0 6px; max-width: 1100px; }
+#saverun { align-items: center; gap: 10px; margin: 0 0 6px 0 !important; max-width: 1100px; align-self: flex-start; width: 100%; }
 #saverun-msg { flex: 3 1 0; min-width: 260px; }
+#saverun-opts { max-width: 1100px; margin: 0 0 8px 0 !important; align-self: flex-start; width: 100%; }
 .chip { display: inline-block; border: 1px solid var(--line); background: var(--card); color: var(--muted);
   padding: 2px 9px; margin: 0 6px 6px 0; border-radius: 3px; font-size: 12px; white-space: nowrap; }
 .chip b { color: var(--ink); font-weight: 600; margin-left: 3px; font-variant-numeric: tabular-nums; }
@@ -925,8 +929,14 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
         r_run_name = gr.Textbox("", show_label=False, container=False, scale=2, min_width=220,
                                 placeholder="Name for a saved run, for example: final run")
         r_run_save = gr.Button("Save run", size="sm", scale=0, min_width=110)
-        r_run_msg = gr.Markdown("Saves everything except the photos (Mooneys, values, all results, figures, subset, 3D) "
-                                "to `runs/<date>_<name>/`.", elem_classes="hint", elem_id="saverun-msg")
+        r_run_msg = gr.Markdown("Freezes the current state in `runs/<date>_<name>/`. Choose below what goes in.",
+                                elem_classes="hint", elem_id="saverun-msg")
+    with gr.Accordion("What a saved run includes", open=False, elem_id="saverun-opts"):
+        with gr.Row():
+            r_run_inc = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
+                                         label="Besides the Mooneys and their values (always saved)", scale=3)
+            r_run_note = gr.Textbox("", label="Note (optional, stored with the run)", lines=2, scale=2,
+                                    placeholder="for example: last run, blur 6, 23 % white, 22 Mooneys adjusted by hand")
 
     with gr.Tabs():
         # ------------------------------------------------------------------ Overview
@@ -1315,7 +1325,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
     r_next.click(lambda s: results_step(s, +1), r_stem, r_stem)
     r_export.click(results_export, None, r_msg)
     demo.load(results_load, None, [r_table, r_fig, r_stem, r_msg])
-    r_run_save.click(run_save, r_run_name, [r_run_msg, c_runs])
+    r_run_save.click(run_save, [r_run_name, r_run_inc, r_run_note], [r_run_msg, c_runs])
 
     # Analysis
     def analysis_groups(by):
