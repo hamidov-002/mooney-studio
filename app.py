@@ -1371,8 +1371,6 @@ def run_config(name, group, note, source, saved_set, vlm_set, sigma, white, bg_m
         j = next((x for x in d3_set_list() if x["folder"] == saved_set), None)
         src = j.get("sub", src) if j else src
     nums = sorted(R_SYS_KEY[s] for s in (systems or []) if s in R_SYS_KEY)
-    if src != R_PHOTOS:
-        nums = [n for n in nums if n != 2]
     return {"v": 2, "name": str(name or "").strip(), "group": str(group or "").strip() or rq.DEFAULT_GROUP, "note": str(note or "").strip(),
             "source": src, "saved_set": saved_set if src != R_PHOTOS else None, "vlm_set": vlm_set,
             "mooneys": bool(on["mooneys"]), "sigma": float(sigma), "white": float(white), "bg_mode": bg_mode, "bg_level": int(bg_level),
@@ -1667,7 +1665,7 @@ def r_summaries(source, saved_set, vlm_set, sigma, white, bg_mode, bg_level, sys
         s_source = f"Photos<br>{len(images_in('Original'))} photos, {len(images_in('Mooney'))} Mooneys"
     else:
         s_source = f"{rb.esc(R_SOURCES[src])}<br>{len(d3_gallery('Original', src))} renders, {len(d3_gallery('Mooney', src))} Mooneys"
-    nums = [R_SYS_KEY[s] for s in (systems or []) if s in R_SYS_KEY and (src == R_PHOTOS or R_SYS_KEY[s] != 2)]
+    nums = [R_SYS_KEY[s] for s in (systems or []) if s in R_SYS_KEY]
     s_sys = rb.chips([R_SYS_SHORT[n] for n in sorted(nums)]) or "no system ticked"
     if 2 in nums:
         s_sys += f"<br>system 2 on <b>{rb.esc(vlm_set or vlm_scope_label())}</b>"
@@ -1711,9 +1709,8 @@ def r_source_changed(source, saved_set, systems):
     if saved_set:
         j = next((x for x in d3_set_list() if x["folder"] == saved_set), None)
         src = j.get("sub", src) if j else src
-    photos = src == R_PHOTOS
     choices = [R_SYS[n] for n in (1, 2, 3, 4)]
-    value = [s for s in (systems or []) if s in choices and (photos or R_SYS_KEY[s] != 2)] or [R_SYS[n] for n in (1, 3, 4)]
+    value = [s for s in (systems or []) if s in choices] or [R_SYS[n] for n in (1, 3, 4)]
     return gr.update(choices=choices, value=value), gr.update(visible=True)
 
 
@@ -1759,7 +1756,9 @@ def r_run_now(open_logs, *form):
     """Add the run and start it at once (only this run)."""
     c = run_config(*form)
     if not c["name"]:
-        c["name"] = f"run {time.strftime('%H:%M')}"
+        # no name typed: the group says what the run is, the time keeps names apart
+        c["name"] = (f"{c['group']} {time.strftime('%H:%M')}" if c.get("group") and c["group"] != rq.DEFAULT_GROUP
+                     else f"run {time.strftime('%H:%M')}")
     refuse = run_refusal(c)
     if refuse:
         return r_view(open_logs, refuse)
@@ -2905,8 +2904,9 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         with gr.Group(visible=False, elem_classes="stage-panel") as r_p_systems:
                             r_systems = gr.CheckboxGroup([R_SYS[n] for n in (1, 2, 3, 4)], value=_r0[7],
                                                          label="Vision systems of this run, on every original (or render) and its Mooney")
-                            gr.Markdown("For a 3D source the run then scores systems 3 and 4 against the true depth. System 2 runs only on "
-                                        "photos, on the set chosen in the Source stage, and is skipped if Ollama is not running.",
+                            gr.Markdown("For a 3D source the run then scores systems 3 and 4 against the true depth and the answers of system 2 "
+                                        "against the light and pose we set. System 2 is slow: it runs on the set chosen in the Source stage "
+                                        "(for invented Basel faces on the first 10 faces) and is skipped if Ollama is not running.",
                                         elem_classes="hint")
                         with gr.Group(visible=False, elem_classes="stage-panel") as r_p_export:
                             gr.Markdown("Writes the summary table and figure to `figures/` (for photos also one panel per favourite; for a 3D "
