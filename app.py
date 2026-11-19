@@ -1194,6 +1194,13 @@ def d3_job(steps, sub, files, lights, basel, progress, systems=None, vlm_set=Non
                     log("No Mooneys of the renders yet - make them in Dataset → 3D datasets first."); return
                 which = [n for n in (1, 3, 4) if systems is None or n in systems]
                 vlm = systems is not None and 2 in systems
+                extra = [n for n in (5, 6) if systems is not None and n in systems]
+                for n in extra:                                  # the mesh and the Viola-Jones detector need no truth scores
+                    log(f"System {R_SYS[n]}")
+                    {5: vs.run_mesh, 6: vs.run_haar}[n](root, "Original", log=log, progress=lambda p: prog(0.02 * p))
+                    log("")
+                if not which and not vlm and extra:
+                    return
                 if not which and not vlm:
                     log("Tick at least one system."); return
                 span = 0.5 if vlm and which else 1.0             # system 2 gets the second half of the bar when both run
@@ -1258,9 +1265,10 @@ PIPE_KEYS = ["name", "note", "keep", "do_batch", "sigma", "white", "bg_mode", "b
 R_PHOTOS = "photos"
 R_SOURCES = {R_PHOTOS: "Photos", f3.SUB: "3D · reconstructed", bfm_fit.SUB: "3D · Basel fitted", bfm.SUB: "3D · Basel invented"}
 R_SOURCE_KEY = {v: k for k, v in R_SOURCES.items()}
-R_SYS = {1: "1 Face model", 2: "2 Vision-language model (needs Ollama)", 3: "3 Learned depth", 4: "4 Depth from shading"}
+R_SYS = {1: "1 Face model", 2: "2 Vision-language model (needs Ollama)", 3: "3 Learned depth", 4: "4 Depth from shading",
+         5: "5 3D face mesh", 6: "6 Viola-Jones detector"}
 R_SYS_KEY = {v: k for k, v in R_SYS.items()}
-R_SYS_SHORT = {1: "1 Face", 2: "2 VLM", 3: "3 Depth", 4: "4 Shading"}
+R_SYS_SHORT = {1: "1 Face", 2: "2 VLM", 3: "3 Depth", 4: "4 Shading", 5: "5 Mesh", 6: "6 Viola-Jones"}
 R_ON = {"mooneys": False, "systems": True, "export": True, "save": True}       # which stages a new run starts with
 R_NO_SET = "–"
 QUEUE_NOTE = ("Every run is frozen in its own saved copy. The project itself is one folder, so after a group has run it holds "
@@ -1413,7 +1421,7 @@ def run_stage_titles(c):
         return [t for t, _w, _f in pipeline_steps({**{k: None for k in PIPE_KEYS}, **c}, {})]
     out = (["Load 3D dataset"] if c.get("saved_set") else []) + (["Mooneys"] if c["mooneys"] else [])
     if c["source"] == R_PHOTOS:
-        out += [R_SYS_SHORT[n] for n in (1, 3, 4, 2) if n in c["systems"]]
+        out += [R_SYS_SHORT[n] for n in (1, 3, 4, 5, 6, 2) if n in c["systems"]]
     elif c["systems"]:
         out += ["Systems " + ", ".join(str(n) for n in c["systems"]) + " and the truth"]
     return out + (["Export"] if c["export"] else []) + (["Save"] if c["save"] else [])
@@ -1484,7 +1492,7 @@ def run_steps(c, saved):
             d3_job(["Mooneys"], sub, [], [], {}, lambda v, desc=None: prog(v))(log)
         steps.append((3, step_batch3d))
     if photos:
-        for n, fn in ((1, vs.run_face), (3, vs.run_depth), (4, vs.run_shading)):
+        for n, fn in ((1, vs.run_face), (3, vs.run_depth), (4, vs.run_shading), (5, vs.run_mesh), (6, vs.run_haar)):
             if n in c["systems"]:
                 steps.append((3, lambda log, prog, fn=fn: fn(PROJECT_ROOT, "Original", log=log, progress=prog)))
         if 2 in c["systems"]:
@@ -1712,7 +1720,7 @@ def r_source_changed(source, saved_set, systems):
     if saved_set:
         j = next((x for x in d3_set_list() if x["folder"] == saved_set), None)
         src = j.get("sub", src) if j else src
-    choices = [R_SYS[n] for n in (1, 2, 3, 4)]
+    choices = [R_SYS[n] for n in (1, 2, 3, 4, 5, 6)]
     value = [s for s in (systems or []) if s in choices] or [R_SYS[n] for n in (1, 3, 4)]
     return gr.update(choices=choices, value=value), gr.update(visible=True)
 
@@ -1725,7 +1733,7 @@ def r_fill(c, sel="source"):
     on = {"mooneys": bool(c["mooneys"]), "systems": bool(c["systems"]), "export": bool(c["export"]), "save": bool(c["save"])}
     source = R_SOURCES.get(c["source"], R_SOURCES[R_PHOTOS])
     photos = c["source"] == R_PHOTOS
-    sys_choices = [R_SYS[n] for n in (1, 2, 3, 4)]
+    sys_choices = [R_SYS[n] for n in (1, 2, 3, 4, 5, 6)]
     systems = [R_SYS[n] for n in c["systems"] if R_SYS[n] in sys_choices] or [R_SYS[n] for n in (1, 3, 4)]
     saved_set = c.get("saved_set") or R_NO_SET
     vlm_set = c.get("vlm_set") if c.get("vlm_set") in photo_set_choices() else vlm_scope_label()
@@ -2901,7 +2909,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                         "and saves the values as the project's defaults; for photos, Mooneys adjusted by hand are kept. "
                                         "Other options (white rule, preprocessing) come from **Mooney → Batch**.", elem_classes="hint")
                         with gr.Group(visible=False, elem_classes="stage-panel") as r_p_systems:
-                            r_systems = gr.CheckboxGroup([R_SYS[n] for n in (1, 2, 3, 4)], value=_r0[7],
+                            r_systems = gr.CheckboxGroup([R_SYS[n] for n in (1, 2, 3, 4, 5, 6)], value=_r0[7],
                                                          label="Vision systems of this run, on every original (or render) and its Mooney")
                             gr.Markdown("For a 3D source the run then scores systems 3 and 4 against the true depth and the answers of system 2 "
                                         "against the light and pose we set. System 2 is slow: it runs on the set chosen in the Source stage "

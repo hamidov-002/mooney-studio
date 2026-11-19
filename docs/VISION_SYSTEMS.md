@@ -172,6 +172,41 @@ the image.
 
 ---
 
+---
+
+## 6 Viola-Jones detector
+
+The face detector of Viola & Jones (2001), as the Haar cascade shipped with OpenCV. It has no neural network: a window
+slides over the image at several sizes and a cascade of simple tests on light and dark rectangles decides whether the
+window holds a face (for example: the eye region is darker than the cheeks below it).
+
+### Model output
+
+A list of boxes the cascade accepts, stored in `Result6/.../<image>.json` as `model_output.boxes_x_y_w_h`. There is no
+confidence value. `Result6/.../<image>.png` shows the image with the boxes.
+
+### Our settings
+
+| Setting | Value |
+|---|---|
+| Cascade | `haarcascade_frontalface_default.xml` (frontal faces) |
+| Input | the image as 8-bit grayscale at its own size |
+| `scaleFactor`, `minNeighbors` | 1.1, 5 |
+| Smallest face | 15 % of the image width |
+
+### Calculated by us
+
+| Value | How | Reading |
+|---|---|---|
+| `face_detected` | at least one box | – |
+| `box_on_the_face` | a box whose centre lies inside the face box system 1 found in the original, and whose width is between half and twice that box's width | guards against a box somewhere else in the picture being counted as a face |
+| `reblur_face_detected`, `reblur_box_on_the_face` | the same on the re-blurred Mooney | – |
+
+Why it is here: a Mooney image is nothing but light and dark regions, which is what this detector's tests look at, so
+it is the natural counterpart to the neural detector of system 1.
+
+---
+
 ## Later step: identity matching (ranking)
 
 Switched off by default. When it is on:

@@ -20,6 +20,7 @@ Working title; in preparation. It describes the experiments made with this tool 
 | Background separation | X. Qin et al. (2020). *U²-Net: Going deeper with nested U-structure for salient object detection.* Pattern Recognition 106. [GitHub](https://github.com/xuebinqin/U-2-Net) |
 | System 1, face detection | W. Wu, H. Peng, S. Yu (2023). *YuNet: A tiny millisecond-level face detector.* Machine Intelligence Research. [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) |
 | System 1, face embedding | Y. Zhong et al. (2021). *SFace: Sigmoid-constrained hypersphere loss for robust face recognition.* IEEE TIP 30. [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) |
+| System 6, classical face detector | P. Viola, M. Jones (2001). *Rapid object detection using a boosted cascade of simple features.* IEEE CVPR. [doi:10.1109/CVPR.2001.990517](https://doi.org/10.1109/CVPR.2001.990517) |
 | System 2, vision-language model | H. Liu et al. (2023). *Visual instruction tuning* (LLaVA). NeurIPS. Served locally with [Ollama](https://ollama.com) |
 | System 3, learned depth | L. Yang et al. (2024). *Depth Anything V2.* NeurIPS. [GitHub](https://github.com/DepthAnything/Depth-Anything-V2) |
 | System 4, depth from shading | P.-S. Tsai, M. Shah (1994). *Shape from shading using linear approximation.* Image and Vision Computing 12(8). [doi:10.1016/0262-8856(94)90002-7](https://doi.org/10.1016/0262-8856(94)90002-7) |

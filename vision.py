@@ -26,7 +26,7 @@ It contains no information that is not in the Mooney, but removes the hard edges
 import base64, csv, io, json, os, random, re, time
 import numpy as np
 import requests
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 import config as cfg
 
@@ -602,6 +602,105 @@ def run_mesh(project, source="Original", log=print, progress=None):
             json.dump({"depth_profile_correlation_between_different_identities": round(float(np.mean(base)), 3), "n_pairs": len(base)},
                       open(os.path.join(project, "analysis", "result5_mesh_reference.json"), "w"), indent=1)
     log(f"Finished in {time.time() - t0:.0f} s. Written to Result5/ and analysis/result5_mesh.csv.")
+    return rows
+
+
+# ----------------------------------------------------------------- system 6: Viola-Jones face detector
+HAAR = {"cascade": "haarcascade_frontalface_default.xml", "scale_factor": 1.1, "min_neighbors": 5, "min_size_fraction": 0.15}
+
+
+def run_haar(project, source="Original", log=print, progress=None):
+    """
+    System 6 - the Viola-Jones detector (Haar cascade, 2001), as shipped with OpenCV. No neural network: it slides a
+    window over the image and tests fixed light-and-dark patterns (for example: the eye region is darker than the
+    cheeks). Model output per image: the boxes it accepts. We count a face as found if there is at least one box,
+    for the original, the Mooney, and the re-blurred Mooney.
+    Writes Result6/{Original,Mooney}/<stem>.json and .png (the image with the boxes), analysis/result6_haar.csv
+    and analysis/result6_haar_protocol.json.
+    """
+    import cv2
+    path = os.path.join(cv2.data.haarcascades, HAAR["cascade"])
+    det = cv2.CascadeClassifier(path)
+    if det.empty():
+        raise RuntimeError(f"The Haar cascade file was not found in this OpenCV installation ({path}).")
+    d = out_dirs(project, 6)
+    items = pairs(project, source)
+    if not items:
+        log(f"No images in {source}/."); return []
+    protocol(project, "result6_haar_protocol.json", {
+        "system": "Viola-Jones face detector (Haar cascade), OpenCV " + cv2.__version__,
+        "model_file": HAAR["cascade"] + " (frontal faces, shipped with OpenCV)",
+        "model_input": "the image as 8-bit grayscale at its own size, no equalisation",
+        "model_output": "a list of boxes (x, y, width, height) the cascade accepts",
+        "settings": {"scaleFactor": HAAR["scale_factor"], "minNeighbors": HAAR["min_neighbors"],
+                     "minSize": f"{HAAR['min_size_fraction']:.2f} of the image width"},
+        "calculated_by_us": {"face_detected": "at least one box",
+                             "box_on_the_face": "a box whose centre lies inside the face box system 1 found in the original and whose "
+                                                "width is between half and twice that box's width (empty if system 1 has not run)",
+                             "reblur_face_detected":
+                             f"the same on the Mooney after a Gaussian blur of sigma {REBLUR_SIGMA} px at 512 px"}})
+
+    def boxes(img):
+        g = np.asarray(img.convert("L"))
+        m = max(int(HAAR["min_size_fraction"] * g.shape[1]), 24)
+        found = det.detectMultiScale(g, scaleFactor=HAAR["scale_factor"], minNeighbors=HAAR["min_neighbors"], minSize=(m, m))
+        return [[int(v) for v in b] for b in found]
+
+    def true_box(stem, size):
+        """The face box the neural detector (system 1) found in the original, scaled to this image, or None."""
+        try:
+            j = json.load(open(os.path.join(project, "Result1", "Original", stem + ".json")))
+            b = j["model_output"]["detector"]["box_x_y_w_h"]
+            return [float(v) for v in b] if b else None
+        except Exception:
+            return None
+
+    def on_face(bx, tb):
+        """How many boxes sit on the face: centre inside the true box and width between half and twice its width."""
+        if tb is None:
+            return None
+        x0, y0, w0, h0 = tb
+        return sum(1 for x, y, w, h in bx if x0 <= x + w / 2 <= x0 + w0 and y0 <= y + h / 2 <= y0 + h0 and 0.5 * w0 <= w <= 2 * w0)
+
+    def save(img, bx, folder, stem, rec):
+        pic = img.convert("RGB").copy()
+        dr = ImageDraw.Draw(pic)
+        for x, y, w, h in bx:
+            dr.rectangle([x, y, x + w, y + h], outline=(43, 90, 158), width=3)
+        pic.save(os.path.join(folder, stem + ".png"))
+        json.dump(rec, open(os.path.join(folder, stem + ".json"), "w"), indent=1)
+
+    rows, t0 = [], time.time()
+    name = "Viola-Jones detector (Haar cascade, OpenCV)"
+    for k, (stem, po, pm) in enumerate(items):
+        io_ = Image.open(po).convert("RGB")
+        bo = boxes(io_)
+        tb = true_box(stem, io_.size)
+        rec = {"file": stem, "condition": "Original", "system": name, "face_detected": bool(bo), "boxes": len(bo),
+               "box_on_the_face": "" if tb is None else bool(on_face(bo, tb)), "model_output": {"boxes_x_y_w_h": bo}}
+        save(io_, bo, d["Original"], stem, rec); rows.append({k2: v for k2, v in rec.items() if k2 != "model_output"})
+        if pm:
+            im = Image.open(pm).convert("RGB").resize(io_.size)
+            bm, bb = boxes(im), boxes(reblur(im))
+            rec = {"file": stem, "condition": "Mooney", "system": name, "face_detected": bool(bm), "boxes": len(bm),
+                   "box_on_the_face": "" if tb is None else bool(on_face(bm, tb)),
+                   "reblur_face_detected": bool(bb), "reblur_boxes": len(bb),
+                   "reblur_box_on_the_face": "" if tb is None else bool(on_face(bb, tb)), "model_output": {"boxes_x_y_w_h": bm},
+                   "model_output_reblurred": {"boxes_x_y_w_h": bb}}
+            save(im, bm, d["Mooney"], stem, rec); rows.append({k2: v for k2, v in rec.items() if not k2.startswith("model_output")})
+        if (k + 1) % 20 == 0 or k + 1 == len(items):
+            log(f"  {k + 1:>{len(str(len(items)))}}/{len(items)}  {stem}")
+        if progress: progress((k + 1) / len(items))
+    write_csv(os.path.join(project, "analysis", "result6_haar.csv"), rows)
+    ro = [r for r in rows if r["condition"] == "Original"]; rm = [r for r in rows if r["condition"] == "Mooney"]
+    log(f"  face found   original {sum(r['face_detected'] for r in ro)} of {len(ro)}" + (
+        f"   Mooney {sum(r['face_detected'] for r in rm)} of {len(rm)}   Mooney re-blurred {sum(r['reblur_face_detected'] for r in rm)} of {len(rm)}" if rm else ""))
+    known = [r for r in rm if r.get("box_on_the_face") != ""]
+    if known:
+        log(f"  box on the real face (checked against system 1's box in the original, n={len(known)})   "
+            f"original {sum(bool(r['box_on_the_face']) for r in ro if r.get('box_on_the_face') != '')}   "
+            f"Mooney {sum(bool(r['box_on_the_face']) for r in known)}   Mooney re-blurred {sum(bool(r['reblur_box_on_the_face']) for r in known)}")
+    log(f"Finished in {time.time() - t0:.0f} s. Written to Result6/ and analysis/result6_haar.csv.")
     return rows
 
 

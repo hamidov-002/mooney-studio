@@ -103,6 +103,17 @@ def measures(project):
         out.append({"system": "4 Depth from shading", "measure": "Depth map correlation with the original's depth map", "kind": "value",
                     "values": {"Original": 1.0, "Mooney": float(np.mean(cs))}, "n": len(cs),
                     "note": f"range {min(cs):.2f} to {max(cs):.2f}"})
+    hz = _csv(project, "result6_haar.csv")
+    if hz:
+        o = [r for r in hz if r["condition"] == "Original"]; m = [r for r in hz if r["condition"] == "Mooney"]
+        out.append({"system": "6 Viola-Jones detector", "measure": "Face detected", "kind": "share",
+                    "values": {"Original": _share(o, "face_detected"), "Mooney": _share(m, "face_detected"),
+                               "Mooney, re-blurred": _share(m, "reblur_face_detected")}})
+        if any(r.get("box_on_the_face") not in (None, "") for r in m):
+            ok = lambda rows, k: [r for r in rows if r.get(k) not in (None, "")]
+            out.append({"system": "6 Viola-Jones detector", "measure": "A box on the real face (checked against system 1's box)", "kind": "share",
+                        "values": {"Original": _share(ok(o, "box_on_the_face"), "box_on_the_face"), "Mooney": _share(ok(m, "box_on_the_face"), "box_on_the_face"),
+                                   "Mooney, re-blurred": _share(ok(m, "reblur_box_on_the_face"), "reblur_box_on_the_face")}})
     g = _csv(project, "result5_mesh.csv")
     if g:
         o = [r for r in g if r["condition"] == "Original"]; m = [r for r in g if r["condition"] == "Mooney"]
