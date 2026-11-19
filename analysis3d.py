@@ -303,6 +303,25 @@ def _system_rows(folder):
     return face, pair
 
 
+def _detector_rows(folder):
+    """What systems 5 (face mesh) and 6 (Viola-Jones) wrote for the images of one folder, keyed by image stem."""
+    out = {}
+    for r in _rows(os.path.join(folder, "analysis", "result5_mesh.csv")):
+        d = out.setdefault(r.get("file"), {})
+        if r.get("condition") == "Original":
+            d["mesh_render"] = an._yes(r.get("face_found"))
+        elif r.get("condition") == "Mooney":
+            d["mesh_mooney"], d["mesh_reblur"] = an._yes(r.get("face_found")), an._yes(r.get("reblur_face_found"))
+    for r in _rows(os.path.join(folder, "analysis", "result6_haar.csv")):
+        d = out.setdefault(r.get("file"), {})
+        if r.get("condition") == "Original":
+            d["haar_render"] = an._yes(r.get("face_detected"))
+        elif r.get("condition") == "Mooney":
+            d["haar_mooney"], d["haar_reblur"] = an._yes(r.get("face_detected")), an._yes(r.get("reblur_face_detected"))
+            d["haar_on_face"] = an._yes(r.get("box_on_the_face"))
+    return out
+
+
 def _system_values(face, pair, stem):
     """The values of one image pair that exist for photos and renders alike."""
     o, m = face.get((stem, "Original")), face.get((stem, "Mooney"))
@@ -318,6 +337,7 @@ def per_render(project, sub=SUB):
     """One record per render with everything known about it (truth scores and the systems), numbers as float or None."""
     face, pair = _system_rows(root(project, sub))
     scores = {os.path.splitext(r["file"])[0]: r for r in _rows(os.path.join(root(project, sub), "analysis", "truth_scores.csv"))}
+    other = _detector_rows(root(project, sub))
     out = []
     for r in renders(project, sub):
         stem = os.path.splitext(r["file"])[0]
@@ -333,6 +353,7 @@ def per_render(project, sub=SUB):
             "d3_render": an._num(s.get("depth3_vs_truth_render")), "d3_mooney": an._num(s.get("depth3_vs_truth_mooney")),
             "d4_render": an._num(s.get("depth4_vs_truth_render")), "d4_mooney": an._num(s.get("depth4_vs_truth_mooney")),
             **{k: v for k, v in _system_values(face, pair, stem).items() if k.startswith("pair")},
+            **other.get(stem, {}),
         })
     return out
 
@@ -514,9 +535,16 @@ NO_TRUTH = "no truth"
 # (label, key, kind); kind: n, count, mean, truth (a mean that exists only where the truth is known)
 MEASURES = [
     ("Image pairs (original or render, and its Mooney)", None, "n"),
-    ("Face found in the original / render", "det_render", "count"),
-    ("Face found in the Mooney", "det_mooney", "count"),
-    ("Face found in the re-blurred Mooney", "det_reblur", "count"),
+    ("Neural detector (system 1): face found in the original / render", "det_render", "count"),
+    ("Neural detector (system 1): face found in the Mooney", "det_mooney", "count"),
+    ("Neural detector (system 1): face found in the re-blurred Mooney", "det_reblur", "count"),
+    ("Face mesh (system 5): face found in the original / render", "mesh_render", "count"),
+    ("Face mesh (system 5): face found in the Mooney", "mesh_mooney", "count"),
+    ("Face mesh (system 5): face found in the re-blurred Mooney", "mesh_reblur", "count"),
+    ("Viola-Jones (system 6): face found in the original / render", "haar_render", "count"),
+    ("Viola-Jones (system 6): face found in the Mooney", "haar_mooney", "count"),
+    ("Viola-Jones (system 6): face found in the re-blurred Mooney", "haar_reblur", "count"),
+    ("Viola-Jones (system 6): a box on the real face, Mooney", "haar_on_face", "count"),
     ("Similarity of the Mooney to its original / render (−1 to 1)", "sim_mooney_render", "mean"),
     ("Learned depth: Mooney against original / render, whole picture", "pair3", "mean"),
     ("Learned depth: Mooney against original / render, central half", "pair3_centre", "mean"),
@@ -527,7 +555,8 @@ MEASURES = [
     ("Depth from shading against the true depth: render", "d4_render", "truth"),
     ("Depth from shading against the true depth: Mooney", "d4_mooney", "truth"),
 ]
-COMPARE_NOTE = ("Each cell carries its own n. *Face found* counts images. Similarity is the face model's. The depth rows are "
+COMPARE_NOTE = ("Each cell carries its own n. *Face found* counts images, for three detectors of different kinds: a neural "
+                "detector, a neural face mesh and the classical Viola-Jones cascade. Similarity is the face model's. The depth rows are "
                 "correlations (1 = the same relief, 0 = unrelated). *Mooney against original / render* compares a system's two "
                 "depth maps with each other; in the 3D sets both pictures have the same black background, so the whole-picture "
                 "value mostly reflects the outline, and the central half is the fairer comparison with the photos. *Against the "
@@ -549,8 +578,9 @@ def set_records(project, sub=None):
     stems = sorted(os.path.splitext(f)[0] for f in (os.listdir(ori) if os.path.isdir(ori) else [])
                    if f.lower().endswith((".jpg", ".jpeg", ".png")) and not f.startswith(".") and "__mesh" not in f)
     face, pair = _system_rows(folder)
+    other = _detector_rows(folder)
     blank = {"d3_render": None, "d3_mooney": None, "d4_render": None, "d4_mooney": None, "light": "", "head_pose": ""}
-    return [{"stem": s, **_system_values(face, pair, s), **blank} for s in stems if has_mooney(s)]
+    return [{"stem": s, **_system_values(face, pair, s), **blank, **other.get(s, {})} for s in stems if has_mooney(s)]
 
 
 def _cell(rows, key, kind, sub):

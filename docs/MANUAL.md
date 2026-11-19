@@ -524,7 +524,7 @@ Every cell carries its own n.
 | Row | Meaning |
 |---|---|
 | Image pairs | originals or renders that have a Mooney |
-| Face found in the original / render, the Mooney, the re-blurred Mooney | images in which the detector finds a face, with the share |
+| Face found in the original / render, the Mooney, the re-blurred Mooney | images in which a detector finds a face, with the share; one block of rows each for the neural detector (system 1), the face mesh (system 5) and Viola-Jones (system 6), which also has a row for boxes that sit on the real face |
 | Similarity of the Mooney to its original / render | face-model similarity, mean |
 | Learned depth / depth from shading: Mooney against original / render | correlation between a system's two depth maps, on the whole picture and on its central half |
 | Learned depth / depth from shading against the true depth: render, Mooney | correlation with the true depth inside the face; 3D sets only, the photos have *no truth* |
