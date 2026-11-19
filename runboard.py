@@ -110,7 +110,7 @@ def board(items, open_logs=(), queue_running=False, busy=None, facts=None):
     """
     facts = facts or {}
     if not items:
-        return ('<div class="rb-empty"><b>No runs yet.</b> Build a run above and press <i>Add to group</i>. '
+        return ('<div class="rb-empty"><b>No runs yet.</b> Build a run above and press <i>Add to queue</i>. '
                 "Runs of one group go one after another; each is saved under its own name.</div>")
     order = []
     for it in items:
@@ -125,7 +125,7 @@ def board(items, open_logs=(), queue_running=False, busy=None, facts=None):
         if n[RUNNING]:
             button = act("Stop", "stop-now", "rb-btn danger", group=g)
         elif n[WAITING] and not queue_running and not busy:
-            button = act("Run group", "run-group", "rb-btn primary", group=g)
+            button = act("Run these", "run-group", "rb-btn primary", group=g)
         elif n[WAITING]:
             button = '<span class="rb-wait">waits for the job that is working</span>'
         else:

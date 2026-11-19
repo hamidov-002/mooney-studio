@@ -28,7 +28,7 @@ class StopNow(BaseException):
 _lock = threading.RLock()
 _worker = {"thread": None, "stop": False}
 _live = {"id": None, "log": [], "stages": [], "fraction": 0.0, "t0": 0.0, "written": 0.0}     # the run that is working now
-DEFAULT_GROUP = "main"
+DEFAULT_GROUP = "Queue"
 
 
 def _path(project):

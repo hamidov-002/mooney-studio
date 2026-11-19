@@ -1371,7 +1371,7 @@ def run_config(name, group, note, source, saved_set, vlm_set, sigma, white, bg_m
         j = next((x for x in d3_set_list() if x["folder"] == saved_set), None)
         src = j.get("sub", src) if j else src
     nums = sorted(R_SYS_KEY[s] for s in (systems or []) if s in R_SYS_KEY)
-    return {"v": 2, "name": str(name or "").strip(), "group": str(group or "").strip() or rq.DEFAULT_GROUP, "note": str(note or "").strip(),
+    return {"v": 2, "name": str(name or "").strip(), "group": rq.DEFAULT_GROUP, "note": str(note or "").strip(),
             "source": src, "saved_set": saved_set if src != R_PHOTOS else None, "vlm_set": vlm_set,
             "mooneys": bool(on["mooneys"]), "sigma": float(sigma), "white": float(white), "bg_mode": bg_mode, "bg_level": int(bg_level),
             "systems": nums if on["systems"] else [], "export": bool(on["export"]), "save": bool(on["save"]), "keep": list(keep or [])}
@@ -1385,8 +1385,8 @@ def run_refusal(c):
     """Why a run cannot start, or None."""
     if run_is_old(c):
         return pipeline_refusal({**{k: None for k in PIPE_KEYS}, **c})
-    if c["save"] and not an.run_slug(c["name"]):
-        return "Not started: give the run a name first, or switch the stage *Save* off."
+    if not an.run_slug(c["name"]):
+        return "Not started: give the run a name first (the box *Run name* at the top of the form)."
     if not (c["mooneys"] or c["systems"] or c["export"] or c["save"]):
         return "Not started: every stage is switched off."
     if c["source"] == R_PHOTOS:
@@ -1519,7 +1519,10 @@ def run_steps(c, saved):
         def step_save(log, prog):
             facts = {k: c[k] for k in ("source", "saved_set", "mooneys", "systems", "export", "vlm_set")}
             facts["source_name"] = R_SOURCES.get(sub, sub)
-            saved["folder"], saved["msg"] = an.save_run(PROJECT_ROOT, RUNS_ROOT, c["name"], include=[RUN_LABELS[x] for x in c["keep"] if x in RUN_LABELS],
+            # a run keeps the 3D dataset it worked on, not the other ones (each is tens to hundreds of MB)
+            mine = {f3.SUB: "3d", bfm_fit.SUB: "fit", bfm.SUB: "basel"}.get(sub)
+            include = [k for k in (RUN_LABELS[x] for x in c["keep"] if x in RUN_LABELS) if k not in ("3d", "fit", "basel") or k == mine]
+            saved["folder"], saved["msg"] = an.save_run(PROJECT_ROOT, RUNS_ROOT, c["name"], include=include,
                                                         note=c["note"], group=c["group"], run=facts)
             log(saved["msg"])
             if not saved["folder"]:
@@ -1622,7 +1625,7 @@ def r_start(open_logs, group=None, only=None):
     items = rq.snapshot(PROJECT_ROOT)
     todo = [it for it in items if it["state"] == rq.WAITING and (group is None or it["group"] == group) and (only is None or it["id"] == only)]
     if not todo:
-        return r_view(open_logs, "Nothing is waiting. Build a run above and press *Add to group*.")
+        return r_view(open_logs, "Nothing is waiting. Build a run above and press *Add to queue*.")
     _stop["on"] = False
     rq.start(PROJECT_ROOT, queue_run_one, group=group, only=only)
     what = f"“{todo[0]['name']}”" if only else (f"group “{group}” ({len(todo)} run{'s' if len(todo) != 1 else ''})" if group
@@ -1749,16 +1752,12 @@ def r_add(open_logs, edit_id, *form):
         return r_view(open_logs, f"Changed “{c['name']}” in group “{c['group']}”. It keeps its place.") + ("", r_edit_note(""))
     rq.add(PROJECT_ROOT, c["name"], c, c["group"], run_stage_titles(c))
     return r_view(open_logs, f"Added “{c['name']}” to group “{c['group']}”. It keeps the values of the form as they are now. "
-                             "Press *Run group* on the group, or *Run all groups*.") + ("", r_edit_note(""))
+                             "Press *Run queue* to start it.") + ("", r_edit_note(""))
 
 
 def r_run_now(open_logs, *form):
     """Add the run and start it at once (only this run)."""
     c = run_config(*form)
-    if not c["name"]:
-        # no name typed: the group says what the run is, the time keeps names apart
-        c["name"] = (f"{c['group']} {time.strftime('%H:%M')}" if c.get("group") and c["group"] != rq.DEFAULT_GROUP
-                     else f"run {time.strftime('%H:%M')}")
     refuse = run_refusal(c)
     if refuse:
         return r_view(open_logs, refuse)
@@ -1770,7 +1769,7 @@ def r_run_now(open_logs, *form):
 
 def r_edit_note(edit_id):
     it = rq.get(PROJECT_ROOT, edit_id) if edit_id else None
-    return (f"Editing “{it['name']}”: *Add to group* now changes that run in place. "
+    return (f"Editing “{it['name']}”: *Add to queue* now changes that run in place. "
             "Press *Cancel edit* to add a new run instead.") if it else ""
 
 
@@ -1805,7 +1804,7 @@ def r_board_click(open_logs, edit_id, evt: gr.EventData):
         c = dict(it["config"])
         if what == "dup":
             c["name"] = f"{c['name']} copy"
-            edit_id, msg = "", f"The form holds a copy of “{it['name']}”. Change what you like and press *Add to group*."
+            edit_id, msg = "", f"The form holds a copy of “{it['name']}”. Change what you like and press *Add to queue*."
         else:
             edit_id, msg = item_id, f"The form holds “{it['name']}”."
         form = r_fill(c)
@@ -1958,7 +1957,7 @@ def r_duplicate():
     last = max(enumerate(items), key=lambda p: (p[1].get("added", ""), p[0]))[1]
     c = dict(last["config"])
     c["name"] = f"{c['name']} copy"
-    return r_fill(c) + (f"The form holds a copy of “{last['name']}”. Change what you like and press *Add to group*.",)
+    return r_fill(c) + (f"The form holds a copy of “{last['name']}”. Change what you like and press *Add to queue*.",)
 
 
 def r_publish_state(name):
@@ -2866,15 +2865,15 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
 
                     # -------------------------------------------------------------- Runs
                     with gr.Tab("Runs") as tab_runs:
-                        gr.Markdown("Build a run from stages, put runs into groups, and let a group work through its runs on its own. "
+                        gr.Markdown("Build a run from stages, give it a name, and run it now or add it to the queue, which works through its runs on its own. "
                                     "A run takes one source (the photos or a 3D dataset) through the stages you switch on; every stage "
                                     "does exactly what its own page does. " + QUEUE_NOTE, elem_classes="lead")
 
                         gr.HTML("<h2 class='zone'><span>1</span> New run</h2>")
                         with gr.Row():
                             r_name = gr.Textbox("", label="Run name", placeholder="for example: photos, final values", scale=3, max_lines=1)
-                            r_group = gr.Dropdown(choices=r_groups(), value=r_groups()[0], label="Group (pick one or type a new name)",
-                                                  allow_custom_value=True, scale=2)
+                            r_group = gr.Dropdown(choices=r_groups(), value=rq.DEFAULT_GROUP, label="Group", allow_custom_value=True, scale=2,
+                                                  visible=False)       # groups are not offered: a run has a name, that is enough
                             r_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=4, max_lines=1,
                                                 placeholder="for example: blur 6.5, 20 % white, 71 adjusted by hand")
                         r_on = gr.State(dict(R_ON))
@@ -2916,18 +2915,18 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                             r_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=_r0[8],
                                                       label="The saved copy includes, besides the Mooneys and their values")
                         with gr.Row():
-                            r_add_btn = gr.Button("Add to group", variant="primary", scale=2)
+                            r_add_btn = gr.Button("Add to queue", variant="primary", scale=2)
                             r_now_btn = gr.Button("Run now", scale=1)
                             r_dup_btn = gr.Button("Duplicate last run", scale=1)
                             r_cancel_btn = gr.Button("Cancel edit", scale=1)
                         r_edit_md = gr.Markdown(elem_classes="hint")
                         r_msg = gr.Markdown(elem_classes="hint")
 
-                        gr.HTML("<h2 class='zone'><span>2</span> Groups and queue</h2>")
+                        gr.HTML("<h2 class='zone'><span>2</span> Queue</h2>")
                         with gr.Row():
                             r_line = gr.Markdown(elem_classes="prose", elem_id="r-line")
                         with gr.Row():
-                            r_all = gr.Button("Run all groups", variant="primary", scale=2)
+                            r_all = gr.Button("Run queue", variant="primary", scale=2)
                             r_stop_after_btn = gr.Button("Stop after the current run", scale=2)
                             r_stop_now_btn = gr.Button("Stop now", variant="stop", scale=1)
                             r_clear_btn = gr.Button("Clear finished", scale=1)
