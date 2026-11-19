@@ -990,13 +990,8 @@ def pick_model(models):
 
 
 def haar_status():
-    """System 6 needs only the cascade file that ships with OpenCV."""
-    try:
-        import cv2
-        ok = os.path.isfile(os.path.join(cv2.data.haarcascades, vs.HAAR["cascade"]))
-    except Exception:
-        ok = False
-    return "ready (ships with OpenCV, no download)" if ok else "cascade file not found in this OpenCV installation"
+    """System 6 needs only the cascade file: the one inside OpenCV, or models/."""
+    return "ready" if vs.haar_ready() else "cascade file downloads on first run (1 MB)"
 
 
 def vision_status():

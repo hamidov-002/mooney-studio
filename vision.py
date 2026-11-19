@@ -609,6 +609,32 @@ def run_mesh(project, source="Original", log=print, progress=None):
 HAAR = {"cascade": "haarcascade_frontalface_default.xml", "scale_factor": 1.1, "min_neighbors": 5, "min_size_fraction": 0.15}
 
 
+HAAR_FILE = ("haarcascade_frontalface_default.xml",
+             "https://raw.githubusercontent.com/opencv/opencv/4.x/data/haarcascades/haarcascade_frontalface_default.xml")
+
+
+def haar_path(log=print):
+    """The cascade file: the one inside OpenCV if this installation has it, otherwise models/ (downloaded once, 1 MB)."""
+    try:
+        import cv2
+        p = os.path.join(cv2.data.haarcascades, HAAR["cascade"])
+        if os.path.isfile(p):
+            return p
+    except Exception:
+        pass
+    return model_path(HAAR_FILE, log)
+
+
+def haar_ready():
+    try:
+        import cv2
+        if os.path.isfile(os.path.join(cv2.data.haarcascades, HAAR["cascade"])):
+            return True
+    except Exception:
+        pass
+    return os.path.isfile(os.path.join(MODELS, HAAR_FILE[0]))
+
+
 def run_haar(project, source="Original", log=print, progress=None):
     """
     System 6 - the Viola-Jones detector (Haar cascade, 2001), as shipped with OpenCV. No neural network: it slides a
@@ -619,10 +645,10 @@ def run_haar(project, source="Original", log=print, progress=None):
     and analysis/result6_haar_protocol.json.
     """
     import cv2
-    path = os.path.join(cv2.data.haarcascades, HAAR["cascade"])
+    path = haar_path(log)
     det = cv2.CascadeClassifier(path)
     if det.empty():
-        raise RuntimeError(f"The Haar cascade file was not found in this OpenCV installation ({path}).")
+        raise RuntimeError(f"The Haar cascade file could not be read ({path}).")
     d = out_dirs(project, 6)
     items = pairs(project, source)
     if not items:
