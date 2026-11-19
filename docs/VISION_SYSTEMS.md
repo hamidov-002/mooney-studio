@@ -197,7 +197,7 @@ Mooney, and `render_shows` in the JSON says which. The JSON next to it holds the
 | Value | How | Reading |
 |---|---|---|
 | `face_found` | a mesh was returned | – |
-| `reblur_face_found` | the same on the re-blurred Mooney | – |
+| `reblur_face_found` | a mesh was returned for the Mooney itself or, failing that, for the re-blurred Mooney | – |
 | `landmark_error_interocular` | mean distance between the landmarks of the re-blurred Mooney and of the original, in the image plane, divided by the distance between the eyes | 0 = the same positions; 0.1 = off by a tenth of the eye distance |
 | `depth_profile_correlation` | Pearson correlation between the z values of the two meshes | 1 = the same relief. `analysis/result5_mesh_reference.json` holds the value between different people, as the baseline: a mesh always looks like a face |
 
