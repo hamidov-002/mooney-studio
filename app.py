@@ -2805,36 +2805,34 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                 with gr.Tabs():
                     # -------------------------------------------------------------- Vision systems
                     with gr.Tab("Vision systems") as tab_vision:
-                        gr.Markdown("Run vision systems on a dataset. Each system takes every original (or render) and its Mooney and returns values "
-                                    "for both: one result file per image in `ResultN/Original` and `ResultN/Mooney`, and a table per system in "
-                                    "`analysis/`. A 3D dataset appears here once it has Mooneys.", elem_classes="lead")
-                        with gr.Row():
+                        gr.Markdown("The vision systems this tool can run, and whether each is ready on this computer. Nothing is run from this "
+                                    "page: runs are set up and started in **Experiments → Runs**, where you choose the source, the systems and, "
+                                    "for system 2, the photos it runs on.", elem_classes="lead")
+                        with gr.Row(visible=False):          # running moved to Runs; kept hidden so nothing else changes
                             v_data = gr.Radio(v_datasets(), value=V_PHOTOS, label="Run on", scale=2)
                             v_ticks = gr.CheckboxGroup(V_SYSTEMS, value=V_3D_DEFAULT, label="Systems to run", scale=3)
-                        gr.Markdown("**1** YuNet detector and SFace embedding: is a face found, and how similar is the Mooney to its original? · "
-                                    "**2** a local vision-language model through Ollama: face present, head pose, light direction, description · "
-                                    "**3** Depth Anything V2: a learned depth map · **4** shape from shading (Tsai & Shah 1994): depth from a "
-                                    "formula · **5** MediaPipe face mesh. On a 3D dataset the depth maps of 3 and 4 are compared with the true "
-                                    "depth, and the answers of system 2 with the light and pose we set (it runs on part of the faces; see its setting). Every value is explained in **Docs → Vision systems**.", elem_classes="hint")
-                        with gr.Row():
-                            v_go = gr.Button("Run the ticked systems", variant="primary", scale=6)
-                            v_stop = gr.Button("Stop", variant="stop", scale=1, min_width=80)
-                        v_log = gr.Textbox(label="Log", lines=11, max_lines=11, interactive=False, autoscroll=True, elem_classes="log")
-                        gr.Markdown("### Results of this dataset", elem_classes="prose")
-                        v_line = gr.Markdown(elem_classes="hint")
-                        v_table = gr.Dataframe(headers=SUMMARY_COLS, label="Summary   counts are images, other values are means", wrap=True, interactive=False)
-                        v_fig = gr.Image(show_label=False, height=380)
-                        gr.Markdown("### Save this state as a run\n<span class='hint'>A run is a frozen copy of the Mooneys, their values and the "
-                                    "results under a name, in the runs folder. Saved runs are listed in **Runs → History** and compared in "
-                                    "**Analysis → Compare runs**.</span>", elem_classes="prose")
-                        with gr.Row():
-                            v_run_name = gr.Textbox("", label="Save run as…", placeholder="for example: final run", scale=2, max_lines=1)
-                            v_run_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=3, max_lines=1)
-                            v_run_save = gr.Button("Save run", scale=1)
-                        v_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
-                                                  label="The saved run includes, besides the Mooneys and their values")
-                        v_run_msg = gr.Markdown(elem_classes="hint")
-                        with gr.Accordion("Settings of the systems", open=False):
+                        gr.Markdown("**1 Face model**: YuNet detector and SFace embedding. Is a face found, and how similar is the Mooney to its "
+                                    "original?  \n**2 Vision-language model**: a local model through Ollama. Face present, head pose, light direction, "
+                                    "a description.  \n**3 Learned depth**: Depth Anything V2, a depth map from a trained network.  \n"
+                                    "**4 Depth from shading**: Tsai & Shah 1994, a depth map from a formula.  \n**5 3D face mesh** (optional): MediaPipe.  \n"
+                                    "Every value they return is explained in **Docs → Vision systems**.", elem_classes="prose")
+                        with gr.Column(visible=False):
+                            v_go = gr.Button("Run the ticked systems", variant="primary")
+                            v_line = gr.Markdown(elem_classes="hint")
+                            v_table = gr.Dataframe(headers=SUMMARY_COLS, wrap=True, interactive=False)
+                            v_fig = gr.Image(show_label=False, height=380)
+                        with gr.Column(visible=False):
+                            gr.Markdown("### Save this state as a run\n<span class='hint'>A run is a frozen copy of the Mooneys, their values and the "
+                                        "results under a name, in the runs folder. Saved runs are listed in **Runs → History** and compared in "
+                                        "**Analysis → Compare runs**.</span>", elem_classes="prose")
+                            with gr.Row():
+                                v_run_name = gr.Textbox("", label="Save run as…", placeholder="for example: final run", scale=2, max_lines=1)
+                                v_run_note = gr.Textbox("", label="Note (optional, stored with the run)", scale=3, max_lines=1)
+                                v_run_save = gr.Button("Save run", scale=1)
+                            v_keep = gr.CheckboxGroup([v[0] for v in an.RUN_GROUPS.values()], value=[an.RUN_GROUPS[k][0] for k in an.RUN_DEFAULT],
+                                                      label="The saved run includes, besides the Mooneys and their values")
+                            v_run_msg = gr.Markdown(elem_classes="hint")
+                        with gr.Group():
                             v_check = gr.Button("Check which systems are ready", size="sm", scale=0)
                             with gr.Row():
                                 v_s1 = gr.Textbox(_vs["face"], label="1 Face model", interactive=False)
@@ -2850,20 +2848,22 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                 o_start = gr.Button("Start Ollama", size="sm", scale=0, min_width=130)
                                 o_name = gr.Textbox(cfg.OLLAMA_MODEL, label="Model to download", max_lines=1, scale=2)
                                 o_pull = gr.Button("Download this model", size="sm", scale=0, min_width=170)
-                            gr.Markdown("*Download* shows its progress in the log above and can be stopped with the Stop button. "
-                                        "A stopped download continues where it was when you start it again.", elem_classes="hint")
+                            with gr.Row():
+                                v_log = gr.Textbox(label="Download log", lines=5, max_lines=5, interactive=False, autoscroll=True, elem_classes="log", scale=6)
+                                v_stop = gr.Button("Stop", variant="stop", scale=1, min_width=80)
+                            gr.Markdown("A stopped download continues where it was when you start it again.", elem_classes="hint")
                             with gr.Row():
                                 v_model = gr.Dropdown(choices=_vs["vlm_models"], value=pick_model(_vs["vlm_models"]),
-                                                      label="System 2: Ollama model", allow_custom_value=True, scale=1)
-                                v_prompt = gr.Textbox(vs.VLM_PROMPT, label="System 2: prompt (saved with the results)", lines=3, scale=3)
-                            with gr.Row():
+                                                      label="Installed vision models (runs use " + str(cfg.OLLAMA_MODEL) + " if installed, else the first)", scale=1)
+                                v_prompt = gr.Textbox(vs.VLM_PROMPT, label="System 2: the question sent with every image (saved with the results)", lines=3, scale=3, interactive=False)
+                            with gr.Row(visible=False):
                                 v_scope = gr.Dropdown(photo_set_choices(), value=vlm_scope_label(), label="System 2 runs on", scale=1)
                                 gr.Markdown("System 2 is heavy: about 5 GB of memory and several seconds per image, so all photos keep the laptop busy "
                                             "for a long time. Choose a subset or your favourites. Systems 1, 3 and 4 are light and always run on every "
                                             "photo, so their tables stay complete.", elem_classes="hint", scale=3)
-                            v_identify = gr.Checkbox(False, label="Identity matching (a later step): also test whether systems 1 and 2 recognise the "
+                            v_identify = gr.Checkbox(False, visible=False, label="Identity matching (a later step): also test whether systems 1 and 2 recognise the "
                                                                   "person (system 1 ranks against the other photos; system 2 is asked for the name)")
-                            v_src = gr.Radio(["Original", "Raw"], value="Original", label="Source folder of the photos")
+                            v_src = gr.Radio(["Original", "Raw"], value="Original", label="Source folder of the photos", visible=False)
 
                     # -------------------------------------------------------------- Runs
                     with gr.Tab("Runs") as tab_runs:
