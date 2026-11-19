@@ -989,9 +989,19 @@ def pick_model(models):
     return cfg.OLLAMA_MODEL if cfg.OLLAMA_MODEL in models else (models[0] if models else None)
 
 
+def haar_status():
+    """System 6 needs only the cascade file that ships with OpenCV."""
+    try:
+        import cv2
+        ok = os.path.isfile(os.path.join(cv2.data.haarcascades, vs.HAAR["cascade"]))
+    except Exception:
+        ok = False
+    return "ready (ships with OpenCV, no download)" if ok else "cascade file not found in this OpenCV installation"
+
+
 def vision_status():
     st = vs.status()
-    return (st["face"], st["vlm"], st["depth"], st["shading"], st["mesh"],
+    return (st["face"], st["vlm"], st["depth"], st["shading"], st["mesh"], haar_status(),
             gr.update(choices=st["vlm_models"], value=pick_model(st["vlm_models"])))
 
 
@@ -2820,7 +2830,8 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         gr.Markdown("**1 Face model**: YuNet detector and SFace embedding. Is a face found, and how similar is the Mooney to its "
                                     "original?  \n**2 Vision-language model**: a local model through Ollama. Face present, head pose, light direction, "
                                     "a description.  \n**3 Learned depth**: Depth Anything V2, a depth map from a trained network.  \n"
-                                    "**4 Depth from shading**: Tsai & Shah 1994, a depth map from a formula.  \n**5 3D face mesh** (optional): MediaPipe.  \n"
+                                    "**4 Depth from shading**: Tsai & Shah 1994, a depth map from a formula.  \n**5 3D face mesh** (optional): MediaPipe.  \n**6 Viola-Jones detector**: the classical Haar cascade "
+                                    "of 2001. Is a face found, and does the box sit on the real face?  \n"
                                     "Every value they return is explained in **Docs → Vision systems**.", elem_classes="prose")
                         with gr.Column(visible=False):
                             v_go = gr.Button("Run the ticked systems", variant="primary")
@@ -2846,6 +2857,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                                 v_s3 = gr.Textbox(_vs["depth"], label="3 Learned depth", interactive=False)
                                 v_s4 = gr.Textbox(_vs["shading"], label="4 Depth from shading", interactive=False)
                                 v_s5 = gr.Textbox(_vs["mesh"], label="5 3D face mesh", interactive=False)
+                                v_s6 = gr.Textbox(haar_status(), label="6 Viola-Jones detector", interactive=False)
                             gr.Markdown("**System 2 needs Ollama**, a separate program that serves the vision-language model on this "
                                         "computer.", elem_classes="hint")
                             o_line = gr.Markdown(ollama_status(), elem_classes="hint")
@@ -3233,7 +3245,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
 
     # ---------------------------------------------------------------------- Experiments → Vision systems
     v_shown = [v_line, v_table, v_fig]
-    v_check.click(vision_status, None, [v_s1, v_s2, v_s3, v_s4, v_s5, v_model])
+    v_check.click(vision_status, None, [v_s1, v_s2, v_s3, v_s4, v_s5, v_s6, v_model])
     v_identify.change(lambda on: vs.VLM_PROMPT_IDENTITY if on else vs.VLM_PROMPT, v_identify, v_prompt)
     v_data.change(v_switch, [v_data, v_ticks], [v_ticks] + v_shown)
     v_go.click(vision_run, [v_data, v_ticks, v_src, v_identify, v_model, v_prompt, v_scope], [v_log, status] + v_shown)
