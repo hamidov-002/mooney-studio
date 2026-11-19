@@ -14,8 +14,10 @@ settings in <project>/analysis/resultN_*_protocol.json.
            -> <stem>.png  : depth map, near = bright
   Result4  depth from shading  Tsai & Shah (1994) shape from shading: a formula, nothing learned
            -> <stem>.png  : depth map, near = bright
-  Result5  3D face mesh        MediaPipe Face Landmarker (478 3D landmarks)   [later step]
+  Result5  3D face mesh        MediaPipe Face Landmarker (478 3D landmarks)
            -> <stem>.png, <stem>.json
+  Result6  Viola-Jones         Haar cascade (Viola & Jones 2001): light and dark rectangles, nothing neural
+           -> <stem>.png  : the image with the boxes, <stem>.json : the boxes
 
 VISION_SYSTEMS.md explains every value: which come straight from a model, which settings are ours, and
 what we calculate.

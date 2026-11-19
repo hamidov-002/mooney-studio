@@ -42,7 +42,7 @@ The usual order of work:
 | 2 | Mooney → Batch | One Mooney per photo, same values for all | `Mooney/`, `params.csv` |
 | 3 | Mooney → By hand | Adjust single photos, mark favourites | `Mooney/`, `params.csv`, `favorites.json` |
 | 4 | Dataset → Subsets | Choose pairs from your favourites into a named subset | `Subset/`, `Subsets/<name>/`, `subsets.json` |
-| 5 | Experiments → Vision systems | The ticked systems run on every original and every Mooney | `Result1/` … `Result4/`, `analysis/` |
+| 5 | Experiments → Vision systems | The ticked systems run on every original and every Mooney | `Result1/` … `Result6/`, `analysis/` |
 | 6 | Analysis | Summary, figures, analysis by photo properties | `figures/` |
 | 7 | Dataset → 3D datasets, then 5 and 6 again | The same on rendered 3D faces with known light and depth | `3D/`, `3D_basel_fit/`, `3D_basel/` |
 | 8 | Experiments → Runs | Build runs, group them, let a group work through them; every run is saved | `runs/` |
@@ -322,6 +322,8 @@ log.
 | 2 Vision-language model | a local model through Ollama | face present, head pose, light direction, one-sentence description | `Result2/*.txt`, `analysis/result2_vlm.csv` |
 | 3 Learned depth | Depth Anything V2, ViT-S (a trained network) | a depth map; for the Mooney its correlation with the original's depth map | `Result3/*.png`, `analysis/result3_depth.csv` |
 | 4 Depth from shading | shape from shading, Tsai & Shah 1994 (a formula, nothing learned) | the same two values as system 3 | `Result4/*.png`, `analysis/result4_shading.csv` |
+| 5 3D face mesh | MediaPipe Face Landmarker (a trained network, 478 3D landmarks) | face found; for the re-blurred Mooney also the landmark error and the correlation of the depth profile against the original's mesh | `Result5/*.png`, `Result5/*.json`, `analysis/result5_mesh.csv` |
+| 6 Viola-Jones detector | Haar cascade of Viola & Jones 2001 (light and dark rectangles, nothing neural) | face found, the boxes, and whether a box sits on the real face | `Result6/*.png`, `Result6/*.json`, `analysis/result6_haar.csv` |
 
 Notes:
 
@@ -353,7 +355,7 @@ the table by light direction against the truth for a 3D dataset.
   subset). It is heavy, so a subset is the usual choice; systems 1, 3 and 4 always run on every photo.
 - *Identity matching* (a later step, off by default): system 1 ranks each image against the other photos,
   system 2 is asked for the name.
-- System 5, the 3D face mesh (MediaPipe), is an optional later step; tick it in the list of systems.
+- Systems 5 (3D face mesh, MediaPipe) and 6 (Viola-Jones detector) need no settings. The mesh model downloads on first use; the cascade file comes with OpenCV or is downloaded once to `models/`.
 
 ## Experiments → Runs
 
@@ -370,7 +372,7 @@ off.
 |---|---|
 | Source | The photos, or one of the 3D datasets made in Dataset → 3D datasets (offered once it has renders), or a saved 3D dataset, which is first loaded as the live one. For photos: the set system 2 runs on. |
 | Mooneys | Off: the Mooneys are used as they are. On: they are made again with the blur, white share, background and phase-1 gray set here; the values become the project's defaults. For photos, Mooneys adjusted by hand are kept. |
-| Vision systems | Photos: any of systems 1 to 4 (system 2 is skipped if Ollama is not running). 3D: systems 1, 3 and 4, followed by the scores against the true depth. |
+| Vision systems | Any of systems 1 to 6, for photos and for 3D datasets alike (system 2 is skipped if Ollama is not running, and on a 3D dataset it runs on the faces of the chosen set). On a 3D dataset systems 3 and 4 are followed by the scores against the true depth. |
 | Export | Summary table and figure to `figures/`, and the comparison of the stimulus sets. |
 | Save | A frozen copy in `runs/<date>_<name>/`, with a choice of what it includes. |
 

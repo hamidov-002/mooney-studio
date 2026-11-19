@@ -7,6 +7,17 @@ pixel are known.
 
 Everything runs on a laptop. No GPU and no account are needed.
 
+Six vision systems of different kinds are built in:
+
+| # | System | Kind |
+|---|---|---|
+| 1 | YuNet detector + SFace embedding | neural face model |
+| 2 | a local vision-language model through Ollama (optional) | vision-language model |
+| 3 | Depth Anything V2 | learned depth |
+| 4 | Tsai & Shah 1994 | shape from shading, a formula |
+| 5 | MediaPipe Face Landmarker | neural 3D face mesh |
+| 6 | Viola-Jones Haar cascade (2001) | classical detector, no network |
+
 ![The Home page on first start](docs/screenshot_overview.png)
 
 ## Quick start
@@ -94,7 +105,7 @@ project/
   Mooney/              one PNG per photo
   Subset/Original, Subset/Mooney    the pairs you picked as the best
   Subsets/<name>/                   further named subsets, same two folders each
-  Result1..4/Original, /Mooney      one file per image and vision system
+  Result1..6/Original, /Mooney      one file per image and vision system
   Raw/                 uncropped photos
   analysis/            one table per system, and the settings each system ran with
   figures/             exported tables, figures and panels

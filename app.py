@@ -2027,7 +2027,7 @@ def run_show(folder):
 
 # ============================================================================ Vision systems on any dataset
 V_PHOTOS = "Photos"
-V_SYSTEMS = ["1 Face model", "2 Vision-language model", "3 Learned depth", "4 Depth from shading", "5 3D face mesh (optional)"]
+V_SYSTEMS = ["1 Face model", "2 Vision-language model", "3 Learned depth", "4 Depth from shading", "5 3D face mesh"]
 V_3D = [V_SYSTEMS[0], V_SYSTEMS[1], V_SYSTEMS[2], V_SYSTEMS[3]]      # what can run on a 3D dataset
 V_3D_DEFAULT = [V_SYSTEMS[0], V_SYSTEMS[2], V_SYSTEMS[3]]            # ticked at first (system 2 is slow)
 
@@ -2825,7 +2825,7 @@ with gr.Blocks(title="Mooney Studio", analytics_enabled=False) as demo:
                         gr.Markdown("**1 Face model**: YuNet detector and SFace embedding. Is a face found, and how similar is the Mooney to its "
                                     "original?  \n**2 Vision-language model**: a local model through Ollama. Face present, head pose, light direction, "
                                     "a description.  \n**3 Learned depth**: Depth Anything V2, a depth map from a trained network.  \n"
-                                    "**4 Depth from shading**: Tsai & Shah 1994, a depth map from a formula.  \n**5 3D face mesh** (optional): MediaPipe.  \n**6 Viola-Jones detector**: the classical Haar cascade "
+                                    "**4 Depth from shading**: Tsai & Shah 1994, a depth map from a formula.  \n**5 3D face mesh**: MediaPipe Face Landmarker, 478 landmarks.  \n**6 Viola-Jones detector**: the classical Haar cascade "
                                     "of 2001. Is a face found, and does the box sit on the real face?  \n"
                                     "Every value they return is explained in **Docs → Vision systems**.", elem_classes="prose")
                         with gr.Column(visible=False):

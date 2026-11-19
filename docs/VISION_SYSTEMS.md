@@ -174,6 +174,38 @@ the image.
 
 ---
 
+## 5 3D face mesh
+
+MediaPipe Face Landmarker, a trained network that returns a face mesh of 478 landmarks with a relative depth for each.
+
+### Model output
+
+The 478 landmarks (x, y, z) of the face it finds. `Result5/.../<image>.png` is a render of that mesh (black if no
+face was found); for a Mooney it shows the mesh from the Mooney itself or, if that gave none, from the re-blurred
+Mooney, and `render_shows` in the JSON says which. The JSON next to it holds the values below.
+
+### Our settings
+
+| Setting | Value |
+|---|---|
+| Model file | `face_landmarker.task`, downloaded on first use |
+| Faces per image | one |
+| Re-blurred condition | the Mooney blurred with the same sigma as for system 1 |
+
+### Calculated by us
+
+| Value | How | Reading |
+|---|---|---|
+| `face_found` | a mesh was returned | – |
+| `reblur_face_found` | the same on the re-blurred Mooney | – |
+| `landmark_error_interocular` | mean distance between the landmarks of the re-blurred Mooney and of the original, in the image plane, divided by the distance between the eyes | 0 = the same positions; 0.1 = off by a tenth of the eye distance |
+| `depth_profile_correlation` | Pearson correlation between the z values of the two meshes | 1 = the same relief. `analysis/result5_mesh_reference.json` holds the value between different people, as the baseline: a mesh always looks like a face |
+
+Why it is here: it is a second neural face system of a different kind (a mesh, not a box), so a result that holds for
+systems 1 and 5 is not a quirk of one detector.
+
+---
+
 ## 6 Viola-Jones detector
 
 The face detector of Viola & Jones (2001), as the Haar cascade shipped with OpenCV. It has no neural network: a window
@@ -219,10 +251,6 @@ Switched off by default. When it is on:
   - Only people with two photos can be tested this way.
 - **System 2** is also asked for the person's name, and we check whether the answer contains it.
 
-## Later step: 3D face mesh (system 5)
-
-MediaPipe Face Landmarker returns 478 3D landmarks. We report whether a mesh is obtained and how close it is
-to the mesh from the original. Results go to `Result5/`.
 
 ## 3D faces: the systems against known truth
 
